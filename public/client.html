@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <base href="/">
+    <meta charset="UTF-8">
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png">
+    <link rel="manifest" href="/site.webmanifest">
+    <meta name="darkreader-lock">
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="viewport" content="width=device-width, viewport-fit=cover, initial-scale=1, maximum-scale=1.0, user-scalable=no">
+    <meta name="theme-color" content="#232428">
+    <title>SillyTavern Multiplayer</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://code.jquery.com/ui/1.13.1/jquery-ui.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/2.3.0/purify.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/showdown@latest/dist/showdown.min.js"></script>
+    <link rel="stylesheet" href="https://code.jquery.com/ui/1.13.1/themes/base/jquery-ui.css">
+    <script type="module" src="script.js"></script>
+    <script type="module" src="src/keepAliveAudio.js"></script>
+    <script type="module" src="src/theme.js"></script>
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <link href="css/fontawesome.css" rel="stylesheet">
+    <link href="css/solid.css" rel="stylesheet">
+    <link href="webfonts/NotoSans/stylesheet.css" rel="stylesheet">
+</head>
+
+<body class="Hcentered flexbox">
+    <audio id="keepAliveAudioElement" src="cup-of-cohee.ogg" preload="auto" loop muted></audio>
+
+
+    <div id="appWrap" class="flexbox noGap Hcentered Vcentered alignContentCenter justifySpaceBetween">
+        <div id="controlPanel" class="hostControls initialState padding5 flexbox flexFlowCol overflowYHidden transition250 opacityZero ">
+            <div id="controlPanelContents" class="flexbox flexFlowCol noGap height100p">
+                <div class="flexFlowCol flexbox">
+                    <div id="AIConfigToggle" class="isControlPanelToggle textBrightUp nonButtonButton flexbox Hcentered Vcentered transition250 bgTransparent textshadow alignSelfCenter">
+                        <i class="fa-solid fa-toggle-on bgTransparent fontSize1p25em textshadow"></i>
+                        <h4>AI Config</h4>
+                    </div>
+                    <div id="AIConfigBlock" class="flexbox flexFlowCol">
+                        <div id="AIConfigWrap" class="flexbox flexFlowCol heightFitContent">
+                            <div id="promptConfig" class="isArrayType flexbox flexFlowCol">
+                                <div id="configSelectorsBlock" class="flexbox justifySpaceAround">
+                                    <div id="promptConfigSelectorsAnddToggles" class="flexbox justifySpaceAround">
+                                        <div class="flexbox flexFlowCol">
+                                            <small class="alignSelfCenter">Mode</small>
+                                            <button id="toggleMode" class="tabbyMode mutedColor square1p5em fontSize1p5em bgBrightUp textshadow" title="Toggle API Mode">📑</button>
+                                        </div>
+                                        <div class="flexbox flexFlowCol alignItemsCenter">
+                                            <small class="alignSelfCenter">Context</small>
+                                            <div class="custom-select">
+                                                <select id="contextSize">
+                                                    <option value="1024">1k</option>
+                                                    <option value="2048">2k</option>
+                                                    <option value="4096">4k</option>
+                                                    <option value="8192">8k</option>
+                                                    <option value="16384">16k</option>
+                                                    <option value="32768">32k</option>
+                                                    <option value="65536">64k</option>
+                                                    <option value="131072">128k</option>
+                                                    <option value="262144">256k</option>
+                                                    <option value="524288">512k</option>
+                                                    <option value="1048576">1M</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div class="flexbox flexFlowCol alignItemsCenter">
+                                            <small class="alignSelfCenter">Response</small>
+                                            <div class="custom-select">
+                                                <select id="responseLength">
+                                                    <option value="50">50</option>
+                                                    <option value="100">100</option>
+                                                    <option value="200">200</option>
+                                                    <option value="300">300</option>
+                                                    <option value="400">400</option>
+                                                    <option value="600">600</option>
+                                                    <option value="800">800</option>
+                                                    <option value="1000">1000</option>
+                                                    <option value="1500">1500</option>
+                                                    <option value="2000">2000</option>
+                                                    <option value="2500">2500</option>
+                                                    <option value="3000">3000</option>
+                                                </select>
+                                            </div>
+                                        </div>
+                                        <div id="isStreamingChekboxBlock" class="flexbox flexFlowCol widthFitContent">
+                                            <small class="alignSelfCenter">Streaming</small>
+                                            <label for="isStreaming" class="checkbox_label flexbox flexFlowCol">
+                                                <input type="checkbox" class="alignSelfCenter margin0" id="isStreaming">
+                                            </label>
+                                        </div>
+                                        <div id="isAutoResponseChekboxBlock" class="flexbox flexFlowCol widthFitContent">
+                                            <small class="alignSelfCenter">AutoAI</small>
+                                            <label for="isAutoResponse" class="checkbox_label flexbox flexFlowCol">
+                                                <input type="checkbox" class="Vcentered" id="isAutoResponse">
+                                            </label>
+                                        </div>
+                                        <div class="flexbox flexFlowCol alignItemsCenter">
+                                            <small class="alignSelfCenter">Instruct</small>
+                                            <div class="custom-select">
+                                                <select id="instructList" class="dynamicSelector"></select>
+                                            </div>
+                                        </div>
+                                        <div class="flexbox flexFlowCol">
+                                            <small class="alignSelfCenter">Samplers</small>
+                                            <div class="custom-select">
+                                                <select id="samplerPresetList" class="dynamicSelector"></select>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div id="TCCCAPIBlock" class="flexbox alignItemsEnd Hcentered">
+
+                                        <div class="flexbox flexFlowCol justifySpaceBetween noWrap">
+                                            <small class="alignSelfCenter">API</small>
+                                            <div class="flexbox">
+                                                <div class="custom-select">
+                                                    <select id="APIList" class="dynamicSelector"></select>
+                                                </div>
+                                                <!-- <div class="flexbox Vcentered"><button id="addNewAPIButton">Add</button></div> -->
+                                                <div class="flexbox Vcentered"><button id="editAPIButton">Edit</button></div>
+                                            </div>
+                                        </div>
+                                        <div id="modelListBlock" class="flexbox flexFlowCol Hcentered">
+                                            <div class="flexbox alignItemsCenter justifyContentCenter">
+                                                <button class="alignSelfCenter margin0 Vcentered bgBrightUp" id="modelLoadButton" title="Attempt to force load the selected model"><i class="fa-solid fa-bars-progress"></i></button>
+                                                <small class="alignSelfCenter">Models</small>
+                                                <button class="alignSelfCenter margin0 Vcentered bgBrightUp" id="modelListRefreshButton" title="Refresh the model list"><i class="fa-solid fa-refresh"></i></button>
+
+                                            </div>
+                                            <div class="flexbox">
+                                                <div class="custom-select flexbox flexFlowCol">
+                                                    <select id="modelList" class="dynamicSelector">
+                                                        <option>Waiting for Model List</option>
+                                                    </select>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                    </div>
+                                    <div id="hordeWorkerListBlock" class="flexbox flexFlowCol">
+                                        <small class="alignSelfCenter">Horde Model</small>
+                                        <div class="custom-select">
+                                            <select id="hordeWorkerList" class="dynamicSelector"></select>
+                                        </div>
+                                    </div>
+                                </div>
+
+
+                            </div>
+                            <div id="APIConfig" class="isArrayType flexbox flexFlowCol width100p" style="display:none;">
+                                <h4 id="apiTitle" class="alignSelfCenter">API Info</h4>
+                                <div id="APIEditDiv" class="transition250 flexbox flexFlowCol  padding5 borderRad5">
+                                    <small>Name</small><input id="selectedAPI" class="width100p" placeholder="API Name">
+                                    <small>API Base URL</small><input id="endpoint" class="width100p" title="http://127.0.0.1:(port)/ for local backends, or https://what.ever-URL.is/given/ for external/Cloud-based APIs." placeholder="http://127.0.0.1:5000/">
+                                    <small>Key</small><input id="key" class="width100p" placeholder="API Key (empty if none)">
+
+                                    <div class="flexbox Vcentered">
+                                        <div class="flexbox flexFlowCol">
+                                            <small class="alignSelfCenter">Endpoint Type</small>
+                                            <div class="custom-select flexbox flexFlowCol">
+                                                <select id="type">
+                                                    <option value="TC">Text Completion</option>
+                                                    <option value="CC">Chat Completion</option>
+                                                </select>
+                                                </option>
+                                            </div>
+                                        </div>
+
+                                        <div class="flexbox flexFlowCol ">
+                                            <small class="alignSelfCenter">Claude</small>
+                                            <label for="claude" class="checkbox_label flexbox flexFlowCol">
+                                                <input type="checkbox" class="alignSelfCenter margin0" id="claude">
+                                            </label>
+                                        </div>
+                                        <div class="flexbox flexFlowCol ">
+                                            <small class="alignSelfCenter">Gemini</small>
+                                            <label for="gemini" class="checkbox_label flexbox flexFlowCol" title="Enable for Google Gemini API (generativelanguage.googleapis.com)">
+                                                <input type="checkbox" class="alignSelfCenter margin0" id="gemini">
+                                            </label>
+                                        </div>
+                                        <div class="flexbox flexFlowCol ">
+                                            <small class="alignSelfCenter">API tokenization</small>
+                                            <label for="useTokenizer" class="checkbox_label flexbox flexFlowCol" title="When enabled, the active API's tokenization endpoint will be used to count prompt tokens and fit the context budget.">
+                                                <input type="checkbox" class="alignSelfCenter margin0" id="useTokenizer">
+                                            </label>
+                                        </div>
+                                    </div>
+
+                                    <div class="flexbox flexFlowCol Hcentered marginTop5">
+                                        <div class="flexbox justifySpaceAround">
+                                            <button class="flexbox Vcentered bgBrightUp" id="cancelAPIEditButton">Close</button>
+                                            <button class="flexbox Vcentered bgBrightUp" id="testAPIButton">Test</button>
+                                            <button class="flexbox Vcentered bgBrightUp" id="saveAPIButton">Save</button>
+                                        </div>
+                                        <div class="flexbox Hcentered marginTop5">
+                                            <button class="flexbox Hcentered bgBrightUp" id="deleteAPIButton" style="color:red">Delete</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <hr>
+                </div>
+                <div class="flex1 flexFlowCol flexbox">
+                    <div id="promptsToggle" class="isControlPanelToggle subToggle textBrightUp nonButtonButton flexbox Hcentered Vcentered transition250 bgTransparent textshadow alignSelfCenter">
+                        <i class="fa-solid fa-toggle-on bgTransparent fontSize1p25em textshadow"></i>
+                        <h4>Insertions</h4>
+                    </div>
+                    <div id="insertionsBlock" class="flexbox flexFlowCol ">
+                        <div id="promptConfigTextFields" class="transition250 flexbox flexFlowCol">
+                            <div id="systemPromptBlock" class="insertionPromptBlock flexbox flexFlowCol Hcentered ">
+
+                                <span class="alignSelfCenter flexbox justifySpaceBetween width100p">
+                                    <i id="toggleSystemPrompt" class="fa-solid fa-toggle-on bgTransparent fontSize1p25em textshadow transition250 textBrightUp insertionKillswitch" title="Enable/Disable System Prompt"></i>
+                                    System Prompt
+                                    <div class="square1p25em"></div><!--spacer-->
+                                </span>
+                                <textarea class="" id="systemPrompt" placeholder="Text in this box will be inserted at the top of the prompt before anything else."></textarea>
+                            </div>
+                            <div id="authorsNoteBlock" class="insertionPromptBlock flexbox flexFlowCol Hcentered">
+
+                                <div class="flexbox Hcentered">
+                                    <span class="alignItemsCenter alignSelfCenter flexbox justifySpaceBetween width100p">
+                                        <i id="toggleD4AN" class="fa-solid fa-toggle-on bgTransparent fontSize1p25em textshadow textBrightUp transition250 insertionKillswitch" title="Enable/Disable D4 Author's Note"></i>
+                                        D4 "Author's Note"
+                                        <label id="D4charDefsLabel" for="D4CharDefs" class="transparent1pxBorder mutedColor nonButtonButton checkbox_label flexbox Vcentered" title="Toggle addition of Character Definitions to D4 Author's Note Insertion">
+                                            +🧠
+                                        </label>
+                                        <input type="checkbox" class="alignSelfCenter margin0" id="D4CharDefs" style="display:none;">
+                                        <!-- <div class="square1p25em"></div> -->
+                                    </span>
+
+                                </div>
+
+                                <textarea class="" id="D4AN" placeholder="The 'Author's Note' slot. A useful place to put character definitions, World Info, or other constantly relevant information."></textarea>
+                            </div>
+                            <div id="finalInstructionBlock" class="insertionPromptBlock flexbox flexFlowCol Hcentered  ">
+
+                                <span class="alignSelfCenter flexbox justifySpaceBetween width100p">
+                                    <i id="toggleD1JB" class="fa-solid fa-toggle-on bgTransparent fontSize1p25em textshadow textBrightUp transition250 insertionKillswitch" title="Enable/Disable D1 Jailbreak"></i>
+                                    D1 "Jailbreak"
+                                    <div class="square1p25em"></div><!--spacer-->
+                                </span>
+                                <textarea class="" id="D1JB" placeholder="A very powerful override instruction. This will usually override the D4 insertion."></textarea>
+                            </div>
+                            <div id="D0InstructionBlock" class="insertionPromptBlock flexbox flexFlowCol Hcentered  ">
+                                <span class="alignSelfCenter flexbox justifySpaceBetween width100p">
+                                    <i id="toggleD0PH" class="fa-solid fa-toggle-on bgTransparent fontSize1p25em textshadow textBrightUp transition250 insertionKillswitch" title="Enable/Disable D0 Post-History Instruction"></i>
+                                    D0 "Post-History Instruction"
+                                    <div class="square1p25em"></div><!--spacer-->
+                                </span>
+                                <textarea class="" id="D0PostHistory" placeholder="Inserted after all pre-existing chat messages."></textarea>
+                            </div>
+                            <div id="responsePrefillBlock" class="insertionPromptBlock flexbox flexFlowCol Hcentered  ">
+
+                                <span class="alignSelfCenter flexbox justifySpaceBetween width100p">
+                                    <i id="toggleResponsePrefill" class="fa-solid fa-toggle-on bgTransparent fontSize1p25em textshadow textBrightUp transition250 insertionKillswitch" title="Enable/Disable Response Prefill"></i>
+                                    Response Prefill
+                                    <div class="square1p25em"></div><!--spacer-->
+                                </span>
+                                <textarea class="" id="responsePrefill" placeholder="Inserted at the front of the AI response."></textarea>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- World Info / Lorebook Section -->
+                    <div id="worldInfoToggle" class="isControlPanelToggle subToggle hostControls textBrightUp nonButtonButton flexbox Hcentered Vcentered transition250 bgTransparent textshadow alignSelfCenter">
+                        <i class="fa-solid fa-toggle-on bgTransparent fontSize1p25em textshadow"></i>
+                        <h4>World Info</h4>
+                    </div>
+                    <div id="worldInfoBlock" class="flexbox flexFlowCol hostControls">
+                        <div id="worldInfoControls" class="flexbox flexFlowCol padding5">
+                            <div class="flexbox justifySpaceBetween alignItemsCenter marginBot5">
+                                <div class="custom-select flex1">
+                                    <select id="lorebookList" class="dynamicSelector">
+                                        <option value="">Select Lorebook...</option>
+                                    </select>
+                                </div>
+                                <button id="newLorebookBtn" class="bgBrightUp marginLeft5" title="Create New Lorebook">+📚</button>
+                                <button id="deleteLorebookBtn" class="bgBrightUp marginLeft5" title="Delete Selected Lorebook" style="color:red;">🗑️</button>
+                            </div>
+                            
+                            <div id="lorebookSettingsBlock" class="flexbox justifySpaceAround alignItemsCenter marginBot5" style="display:none;">
+                                <label class="flexbox alignItemsCenter noWrap">
+                                    <small>Depth:</small>
+                                    <input type="number" id="lorebookScanDepth" class="width3p5em" min="1" max="50" value="5" title="How many messages to scan for keywords">
+                                </label>
+                                <label class="flexbox alignItemsCenter noWrap">
+                                    <small>Budget:</small>
+                                    <input type="number" id="lorebookTokenBudget" class="width3p5em" min="50" max="5000" value="500" title="Max tokens for World Info entries">
+                                </label>
+                            </div>
+                            
+                            <div id="lorebookEntriesBlock" style="display:none;">
+                                <div class="flexbox justifySpaceBetween alignItemsCenter marginBot5">
+                                    <small class="mutedColor">Entries</small>
+                                    <button id="newEntryBtn" class="bgBrightUp" title="Add New Entry">+ Entry</button>
+                                </div>
+                                <div id="lorebookEntryList" class="flexbox flexFlowCol overflowYAuto" style="max-height: 200px;">
+                                    <!-- Dynamic entry list will be populated here -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Character Editor Section -->
+                    <div id="characterEditorToggle" class="isControlPanelToggle subToggle hostControls textBrightUp nonButtonButton flexbox Hcentered Vcentered transition250 bgTransparent textshadow alignSelfCenter">
+                        <i class="fa-solid fa-toggle-on bgTransparent fontSize1p25em textshadow"></i>
+                        <h4>Character Editor</h4>
+                    </div>
+                    <div id="characterEditorBlock" class="flexbox flexFlowCol hostControls" style="display:none;">
+                        <div id="characterEditorControls" class="flexbox flexFlowCol padding5">
+                            <!-- Character Selector -->
+                            <div class="flexbox justifySpaceBetween alignItemsCenter marginBot5">
+                                <div class="custom-select flex1">
+                                    <select id="charEditorSelect" class="dynamicSelector">
+                                        <option value="">Select Character...</option>
+                                    </select>
+                                </div>
+                                <button id="charEditorRefresh" class="bgBrightUp marginLeft5" title="Reload Character Data">🔄</button>
+                            </div>
+                            
+                            <!-- Character Fields (hidden until character selected) -->
+                            <div id="charEditorFields" style="display:none;">
+                                <!-- Core Fields -->
+                                <div class="flexbox flexFlowCol marginBot5">
+                                    <small class="mutedColor">Name</small>
+                                    <input type="text" id="charEditorName" class="width100p" placeholder="Character name">
+                                </div>
+                                
+                                <div class="flexbox flexFlowCol marginBot5">
+                                    <small class="mutedColor">Description</small>
+                                    <textarea id="charEditorDescription" class="width100p" rows="4" placeholder="Character description..."></textarea>
+                                </div>
+                                
+                                <div class="flexbox flexFlowCol marginBot5">
+                                    <small class="mutedColor">First Message</small>
+                                    <textarea id="charEditorFirstMes" class="width100p" rows="3" placeholder="Character's opening message..."></textarea>
+                                </div>
+                                
+                                <!-- Extended v2 Fields -->
+                                <div class="flexbox flexFlowCol marginBot5">
+                                    <small class="mutedColor">Personality</small>
+                                    <textarea id="charEditorPersonality" class="width100p" rows="2" placeholder="Personality traits..."></textarea>
+                                </div>
+                                
+                                <div class="flexbox flexFlowCol marginBot5">
+                                    <small class="mutedColor">Scenario</small>
+                                    <textarea id="charEditorScenario" class="width100p" rows="2" placeholder="Scene/context setup..."></textarea>
+                                </div>
+                                
+                                <div class="flexbox flexFlowCol marginBot5">
+                                    <small class="mutedColor">System Prompt</small>
+                                    <textarea id="charEditorSystemPrompt" class="width100p" rows="2" placeholder="System-level instructions..."></textarea>
+                                </div>
+                                
+                                <div class="flexbox flexFlowCol marginBot5">
+                                    <small class="mutedColor">Post-History Instructions</small>
+                                    <textarea id="charEditorPostHistory" class="width100p" rows="2" placeholder="Instructions after chat history..."></textarea>
+                                </div>
+                                
+                                <div class="flexbox flexFlowCol marginBot5">
+                                    <small class="mutedColor">Creator Notes</small>
+                                    <textarea id="charEditorCreatorNotes" class="width100p" rows="2" placeholder="Notes for users of this character..."></textarea>
+                                </div>
+                                
+                                <div class="flexbox flexFlowCol marginBot5">
+                                    <small class="mutedColor">Example Messages</small>
+                                    <textarea id="charEditorMesExample" class="width100p" rows="3" placeholder="&lt;START&gt;\n{{user}}: Hello\n{{char}}: Hi there!"></textarea>
+                                </div>
+                                
+                                <!-- Alternate Greetings -->
+                                <div class="flexbox flexFlowCol marginBot5">
+                                    <div class="flexbox justifySpaceBetween alignItemsCenter">
+                                        <small class="mutedColor">Alternate Greetings</small>
+                                        <button id="charEditorAddGreeting" class="bgBrightUp" title="Add Alternate Greeting">+ Greeting</button>
+                                    </div>
+                                    <div id="charEditorGreetingsList" class="flexbox flexFlowCol overflowYAuto marginTop5" style="max-height: 150px;">
+                                        <!-- Dynamic greeting entries will be added here -->
+                                    </div>
+                                </div>
+                                
+                                <!-- Action Buttons -->
+                                <div class="flexbox justifySpaceAround marginTop5">
+                                    <button id="charEditorSave" class="bgBrightUp" title="Save changes to character card">💾 Save</button>
+                                    <button id="charEditorRevert" class="bgBrightUp" title="Discard changes and reload">↩️ Revert</button>
+                                </div>
+                                
+                                <small id="charEditorStatus" class="mutedColor alignSelfCenter marginTop5"></small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+        </div>
+        <div id="leftSpanner" class="spanner15vw" hidden></div>
+        <div id="bodyWrap" class="flexbox noWrap noGap flexFlowCol">
+            <div id="contentWrap" class="flexbox transition250 justifyContentCenter flexFlowCol alignSelfCenter noGap paddingLR5  ">
+                <div id="universalControls" class="flexbox transition250  heightFitContent Vcentered Hcentered justifySpaceBetween alignSelfCenter">
+                    <div id="NOOP_universalControlsSpacer" class="guestSpacing fontSize1p25em square1p5em"></div>
+                    <button id="controlPanelToggle" class="opacityHalf hostControls Vcentered bgTransparent fontSize1p25em square1p5em greyscale textshadow" title="Toggle Control Panel">🎛️</button>
+                    <div class="universalCentralControls flexbox noWrap heightFitcontent transition250">
+                        <button id="chatsToggle" class="hideDivButton Vcentered bgTransparent fontSize1p25em mutedColor textshadow">🖼️</button>
+                        <button id="refreshBtn" class="Vcentered bgTransparent fontSize1p25em mutedColor textshadow" title="Force Page Refresh">🔄</button>
+                        <button id="reconnectButton" class="Vcentered bgTransparent fontSize1p25em mutedColor textshadow" hidden title="Connect">▶️</button>
+                        <button id="disconnectButton" class="Vcentered bgTransparent fontSize1p25em mutedColor textshadow" title="Disconnect">⏸</button>
+                        <button id="submitkey" class="Vcentered bgTransparent fontSize1p25em mutedColor textshadow" title="Submit Role Key">🔑</button>
+                        <button id="clearLocalStorage" class="Vcentered bgTransparent fontSize1p25em mutedColor textshadow" title="Delete Usernames and Unique ID">⛔</button>
+                    </div>
+                    <div class="flexbox noWrap heightFitcontent">
+                        <button id="userListsToggle" class="opacityHalf Vcentered bgTransparent fontSize1p25em greyscale textshadow">📜</button>
+                    </div>
+                </div>
+
+                <div id="chatWrap" class="flexbox transition250 justifyContentCenter flex1 noWrap alignItemsCenter">
+
+                    <div id="LLMChatWrapper" class="flexbox flexFlowCol transition250 flex1 noGap">
+                        <div class="chatHeader Hcentered Vcentered flexbox positionRelative justifySpaceBetween width100p">
+                            <button id="emptyAIChatDisplay" class="transition250 chatSweep bgTransparent square1p5em fontSize1p25em greyscale textshadow" title="Empty AI Chat\n(Affects Your Display Only)">🧹</button>
+                            <div class="flexbox alignItemsCenter AIChatHeaderCenterCluster">
+                                AI Chat name:
+                                <span id="AIChatUserNameHolder" hidden></span>
+                                <label for="AIUsernameInput" class="alignItemsCenter alignSelfCenter flexFlowCol flexbox noTextWrap noWrap widthFitContent">
+                                    <input type="text" maxlength="12" id="AIUsernameInput" class="width100px bgBrightUp" placeholder="Username">
+                                </label>
+                            </div>
+                            <div id="NOOP_AIChatHeaderSpacer" class="guestSpacing square1p5em fontSize1p25em" style="opacity: 0;"> </div>
+                            <button id="clearAIChat" class="hostControls bgTransparent square1p5em fontSize1p25em greyscale bgBrightUp textshadow" title="Clear AI Chat History\n(Ends current chat session and starts a new one with selected character.)">🗑️</button>
+                        </div>
+                        <div id="AIChatDropOverlay" class="transition250">📎 Drop PNG Character Card Here</div>
+
+                        <div id="AIChat" data-chat-id="AIChat" class="chatWindow drop-zone marginTop5 transition250 positionRelative flex1 overflowXHidden width100p"></div>
+
+                        <div id="AIChatHostControls" class="hostControls flexbox justifySpaceAround noWrap Vcentered">
+                            <label for="AIChatDelay" class="flexbox noWrap square1p5em fontSize1p5em textshadow Vcentered" title="AI Chat Cooldown Timer (seconds, max 999)">
+                                <span class="greyscale">⏳</span>
+                                <input type="text" id="AIChatDelay" data-for-config-array="crowdControl" class="numbersOnlyTextInput hostControls flexbox Vcentered" value="2">
+                            </label>
+                            <label for="AIChatAutoClearCadence" class="unavailable-overlay flexbox noWrap square1p5em fontSize1p5em textshadow Vcentered " title="Auto clear AI Chat after X messages (max 999)">
+                                <span class="greyscale">🗑️</span>
+                                <input type="text" id="AIChatAutoClearCadence" data-for-config-array="crowdControl" class="numbersOnlyTextInput hostControls flexbox Vcentered" value="2">
+                            </label>
+                            <button id="deleteLastMessageButton" class="fontSize1p5em square1p5em bgTransparent  greyscale textshadow" title="Remove last message from chat">✂️</button>
+                            <label for="AIResponseCadence" class="flexbox noWrap square1p5em  textshadow Vcentered" title="Trigger AI Response every X User messages (max 999)">
+                                <button id="triggerAIResponse" class="fontSize1p5em square1p5em bgTransparent greyscale textshadow" title="Click to Request Immediate AI Response">🤖</button>
+                                <div class="unavailable-overlay">
+                                    <input type="text" id="AIResponseCadence" data-for-config-array="crowdControl" class=" numbersOnlyTextInput flexbox hostControls Vcentered" value="2">
+                                </div>
+                            </label>
+
+                            <button id="AIRetry" class="fontSize1p5em square1p5em bgTransparent  greyscale textshadow" title="Regenerate AI Response">🔄</button>
+                        </div>
+                        <div id="AIInputBlock" class="flexbox noWrap">
+                            <div class="inputAndIconsWrapper flexbox transition250 positionRelative">
+                                <textarea id="AIMessageInput" class="transition0" maxlength="1000" placeholder="Message the AI Chat"></textarea>
+                                <div class="flexbox">
+                                    <button id="AISendButton" class="bgTransparent greyscale fontSize1p5em square1p5em textshadow" title="Send a message">✏️</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="OOCChatWrapper" class="flexbox flexFlowCol transition250 flex1 noGap">
+                        <div class="Hcentered Vcentered chatHeader flexbox justifySpaceBetween positionRelative">
+                            <button id="emptyUserChatDisplay" class="transition250 chatSweep bgTransparent square1p5em fontSize1p25em greyscale textshadow" title="Empty  Chat\n(Affects Your Display Only)">🧹</button>
+                            <div class="flexbox alignItemsCenter ">
+                                User-only chat name:
+                                <span id="userChatUserNameHolder" hidden></span>
+                                    <input type="text" maxlength="12" id="usernameInput" class="width100px bgBrightUp" placeholder="Username">
+                                </label>
+                                <button id="userProfileButton" class="bgTransparent fontSize1p25em square1p5em textshadow" title="Edit User Persona">👤</button>
+                                <button id="loginButton" class="bgTransparent fontSize1p25em square1p5em textshadow" title="Login / Register">🔐</button>
+                            </div>
+                            <div>
+                                <div id="NOOP_UserChatHeaderSpacer" class="guestSpacing square1p5em fontSize1p25em" style="opacity: 0;"> </div>
+                                <button id="clearUserChat" class="hostControls chatTrash square1p5em fontSize1p25em greyscale bgBrightUp textshadow" title="Clear User Chat History">🗑️</button>
+                            </div>
+                        </div>
+
+                        <div id="userChat" data-chat-id="userChat" class="chatWindow marginTop5 transition250 positionRelative flex1 overflowXHidden width100p"></div>
+                        <div id="userChatHostControls" class="hostControls flexbox justifySpaceAround noWrap">
+                            <label for="userChatDelay" class="flexbox noWrap square1p5em fontSize1p5em textshadow Vcentered" title="User Chat Cooldown Timer (seconds, max 999)">
+                                <span class="greyscale">⏳</span>
+                                <input type="text" inputmode="numeric" pattern="[0-9]*" id="userChatDelay" data-for-config-array="crowdControl" class="numbersOnlyTextInput hostControls flexbox Vcentered" value="2">
+                            </label>
+                            <label for="userChatAutoclearCadence" class="unavailable-overlay flexbox noWrap square1p5em fontSize1p5em textshadow Vcentered " title="Auto clear AI Chat after X messages (max 999)">
+                                <span class="greyscale">🗑️</span>
+                                <input type="text" inputmode="numeric" pattern="[0-9]*" id="userChatAutoclearCadence" data-for-config-array="crowdControl" class="numbersOnlyTextInput hostControls flexbox Vcentered" value="2">
+                            </label>
+                        </div>
+                        <div id="inputBlock" class="flexbox noWrap">
+                            <div class="inputAndIconsWrapper flexbox transition250 positionRelative">
+                                <textarea id="messageInput" class="transition0" maxlength="1000" placeholder="Message the User Chat"></textarea>
+                                <div id="userChatInputButtons" class="flexbox">
+                                    <button id="sendButton" class="bgTransparent greyscale fontSize1p5em square1p5em textshadow" title="Send a Message to User Chat">✏️</button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>
+
+        <div id="userListsWrap" class="transition250 flexbox padding5 noGap flexFlowCol opacityZero">
+            <div class="flexFlowCol flexbox hostControls">
+                <div id="pastChatsToggle" class="isControlPanelToggle hostControls textBrightUp nonButtonButton flexbox Hcentered Vcentered transition250 bgTransparent textshadow alignSelfCenter">
+                    <i class="fa-solid fa-toggle-on bgTransparent fontSize1p25em textshadow"></i>
+                    <h4>Past Chats</h4>
+                </div>
+                <div id="pastChatsBlock" class="flexbox flexFlowCol">
+                    <div id="pastChatsWrap" class="flexbox flexFlowCol ">
+                        <!-- hidden button that is auto-clicked on each mesage received to update chat list -->
+                        <button id="showPastChats" class="Vcentered bgTransparent fontSize1p25em mutedColor textshadow" title="Refresh Past Chats List" hidden>🔄</button>
+                        <div id="pastChatsList" class="flexbox Hcentered alignContentStart"></div>
+                    </div>
+                </div>
+                <hr class="width100p">
+            </div>
+            <div class="flexFlowCol flexbox hostControls justifyContentCenter alignContentCenter alignItemsCenter">
+                Active Characters
+                <div class="custom-select hostControls">
+                    <button id="charDefsPopupButton" class="hostControls charSlotActionButton bgTransparent mutedColor fontSize1p25em square1p5em" title="Open Character Definitions Edit Panel">🧠</button>
+                    <select id="cardList" class="hostControls flex1 dynamicSelector"></select>
+                    <button id="forceCharReply" class="hostControls charSlotActionButton charForceResponseButton flexbox Vcentered bgTransparent fontSize1p25em mutedColor textshadow" title="Trigger single response from this character">💬</button>
+                    <button id="muteChar" class="hostControls toggleButton charMuteButton charSlotActionButton flexbox Vcentered bgTransparent fontSize1p25em greyscale dimmed textshadow" title="Exclude this character from automated response chains">🚫</button>
+                </div>
+                <div class="width100p flexbox justifyContentCenter marginTop5">
+                    <button id="addCharacterSlot" class="hostControls bgTransparent mutedColor" title="Add another character slot">➕ Add Character</button>
+                </div>
+                <hr class="width100p">
+            </div>
+            <div class="flexFlowCol flexbox flex1">
+                <div id="crowdControl" class=" isArrayType flexbox flexFlowCol heightFitContent justifyContentEnd Vcentered">
+
+                    <div class="alignItemsCenter flexbox flexFlowCol">
+
+                        <div class="flexbox alignItemsCenter flexFlowCol">
+
+                            <div class="flexbox alignItemsCenter">
+                                <span class="mutedColor flexbox Vcentered bgTransparent fontSize1p25em alignSelfFlexEnd textshadow" title="Adjust STMP UI Theme">🎨: </span>
+                                <div class="flexbox alignItemsCenter flexFlowCol">
+
+                                    H <input id="themeHue" class="width3p5em" data-for="hue" type="number" min="0" max="360" title="Hue 0 to 360">
+                                </div>
+                                <div class="flexbox alignItemsCenter flexFlowCol">
+                                    S <input id="themeSaturation" class="width3p5em" data-for="saturation" type="number" min="0" max="100" title="Saturation 0 to 100">
+                                </div>
+                                <div class="flexbox alignItemsCenter flexFlowCol">
+                                    L <input id="themeLightness" class="width3p5em" data-for="lightness" type="number" min="0" max="100" title="Lightness 0 to 100">
+                                </div>
+                            </div>
+
+                        </div>
+
+                        <div class="flexbox alignItemsCenter">
+                            <button id="keepAliveAudio" class="Vcentered toggleButton bgTransparent fontSize1p25em mutedColor textshadow" title="Play silent background audio to keep remote connections alive">🎶</button>
+                            <button id="showHostToast" class="hostControls flexbox Vcentered bgTransparent fontSize1p25em mutedColor textshadow" title="Send a Host Toast to all Users">📢</button>
+                            <button id="disableGuestInput" class="hostControls toggleButton flexbox Vcentered bgTransparent fontSize1p25em mutedColor textshadow" title="disable Guest Input" aria-pressed="false">🤐</button>
+                            <button id="turnBasedMode" class="hostControls unavailable-overlay flexbox Hcentered Vcentered bgTransparent fontSize1p25em mutedColor textshadow" title="Turn-based Mode">🔢</button>
+                            <button id="allowImages" class="hostControls toggleButton flexbox Vcentered bgTransparent fontSize1p25em mutedColor textshadow" title="Allow Image Embeds in Chat Messages (toggle)" aria-pressed="false">🖌️</button>
+                        </div>
+                    </div>
+                </div>
+                <hr class="width100p">
+                <div id="lists" class="flexbox flex1 justifyContentCenter noGap">
+                    <div id="userList" class="flexbox transition250 flexFlowCol ">
+                        <small class="alignSelfCenter">Users</small>
+                        <ul></ul>
+                    </div>
+                    <div id="AIChatUserList" class="flexbox flexFlowCol flexFlowCol ">
+                        <small class="alignSelfCenter">In Prompt</small>
+                        <ul></ul>
+                    </div>
+                </div>
+                <hr class="width100p">
+            </div>
+        </div>
+    </div>
+    </div>
+
+
+
+    <div id="roleKeyInputDiv" class="justifyContentCenter marginBot5 marginTop5 flexbox width100p" style="display:none; top:0; position:fixed; z-index:1000;">
+        <input id="roleKeyInput" type="text" maxlength="32" class="width100px bgBrightUp" placeholder="Insert 32-character Role Key Here">
+    </div>
+    <div id="hostToast"></div>
+
+</body>
+
+</html>

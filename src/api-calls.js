@@ -1,0 +1,1891 @@
+
+import fs from 'fs';
+import $ from 'jquery';
+import util from 'util';
+import stream from './stream.js';
+import db from './db.js';
+import fio from './file-io.js';
+import { apiLogger as logger } from './log.js';
+import { response } from 'express';
+import {
+    estimateCCTokensByRender,
+    computeCCBudget,
+    getTemplateNameFromInstructFile,
+    estimateCCMessageTokensByRender,
+    estimateCCSystemTokensByRender,
+    estimateCCAssistantPrimerTokensByRender,
+    approxTokensFromChars,
+    compressSpecialMarkersForEstimation,
+    estimateMessageTokens_CC,
+    estimateSystemTokens_CC,
+    estimateNudgeTokens_CC,
+    buildRenderedCCPrompt,
+} from './localTokenizer.js';
+import { calibrateFactor, tryRemoteTokenize } from './remoteTokenizer.js';
+import lorebook from './lorebook.js';
+
+
+function delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+var TCAPIDefaults, HordeAPIDefaults
+
+
+async function getAPIDefaults(shouldReturn = null) {
+    try {
+        const fileContents = await fio.readFile('default-API-Parameters.json');
+        const jsonData = JSON.parse(fileContents);
+        const { TCAPICallParams, HordeAPICallParams } = jsonData[0];
+        TCAPIDefaults = TCAPICallParams;
+        HordeAPIDefaults = HordeAPICallParams;
+        if (shouldReturn) {
+            let defaults = [TCAPIDefaults, HordeAPIDefaults]
+            return defaults
+        }
+
+    } catch (error) {
+        logger.error('Error reading or parsing default-API-Parameters.json:', error);
+    }
+}
+
+//MARK: getAIResponse
+// preInitCallback: optional function invoked after building the prompt, stop strings,
+// and AIChatUserList but BEFORE sending the network request. Enables single-pass
+// streaming setup (initialize listeners early) without a separate dry-run.
+async function getAIResponse(isStreaming, hordeKey, engineMode, user, liveConfig, liveAPI, preInitCallback, parsedMessage, shouldContinue) {
+    // logger.warn('getAIResponse liveAPI:', liveAPI)
+    // logger.warn(`liveConfig: ${JSON.stringify(liveConfig)}`);
+    const isCCSelected = liveAPI.type === 'CC';
+    const isClaude = liveAPI.claude;
+
+    let apiCallParams;
+
+    try {
+        apiCallParams = engineMode === 'TC' ? TCAPIDefaults : HordeAPIDefaults;
+
+        const charFile = liveConfig.promptConfig.selectedCharacter;
+        const cardData = await fio.charaRead(charFile, 'png');
+        const cardJSON = JSON.parse(cardData);
+        const charName = cardJSON.name;
+        const formattedCharName = JSON.parse(JSON.stringify(`\n${charName}:`).replace(/<[^>]+>/g, ''));
+
+    // If a continuation target is specified, limit chat history up to that message when crafting the prompt
+        const continueTarget = parsedMessage?.continueTarget || null;
+        if (parsedMessage?.skipCharDefs) {
+            // annotate the continueTarget so addCharDefsToPrompt can behave without card data
+            if (continueTarget) continueTarget.skipCharDefs = true;
+            if (parsedMessage.overrideCharName) {
+                liveConfig.promptConfig.selectedCharacterDisplayName = parsedMessage.overrideCharName;
+            }
+        }
+        // Ensure useTokenizer is defined on liveAPI; if missing, derive from liveConfig
+        try {
+            if (typeof liveAPI?.useTokenizer !== 'boolean') {
+                const apiCfg = liveConfig?.APIConfig;
+                const pc = liveConfig?.promptConfig;
+                let resolved = false;
+                if (typeof apiCfg?.useTokenizer === 'boolean') {
+                    resolved = apiCfg.useTokenizer;
+                } else if (Array.isArray(pc?.APIList)) {
+                    const sel = pc.selectedAPI;
+                    const fromList = pc.APIList.find(a => a && a.name === sel);
+                    if (fromList && typeof fromList.useTokenizer === 'boolean') {
+                        resolved = fromList.useTokenizer;
+                    }
+                }
+                liveAPI = { ...(liveAPI || {}), useTokenizer: resolved };
+                logger.debug('[Tokenizer] liveAPI.useTokenizer was undefined; resolved to:', resolved);
+            }
+        } catch (_) { /* noop */ }
+
+        const [fullPrompt, includedChatObjects, lastInContextMessageID] = await addCharDefsToPrompt(liveConfig, charFile, formattedCharName, parsedMessage.username, liveAPI, shouldContinue, continueTarget, user.persona);
+        const samplerData = await fio.readFile(liveConfig.promptConfig.selectedSamplerPreset);
+        const samplers = JSON.parse(samplerData);
+        //logger.info('[getAIResponse] >> samplers:', samplerData)
+
+    if (isCCSelected) apiCallParams = {}
+        //logger.info('apiCallParams samplers cleared')
+        //logger.info('PROOF: ', apiCallParams.params)
+        Object.entries(samplers).forEach(([key, value]) => {
+
+            if (engineMode === 'horde') {
+                apiCallParams.params[key] = value;
+            } else {
+                //logger.info(`[getAIResponse] >> key: ${key}, value: ${value}`)
+                apiCallParams[key] = value;
+            }
+        });
+
+        apiCallParams.stream = isStreaming;
+
+        if (!isCCSelected) {
+            apiCallParams.prompt = fullPrompt;
+        } else {
+            apiCallParams.messages = fullPrompt;
+        }
+
+        if (engineMode !== 'horde' && !isCCSelected) { // add max_tokens for TC (others handled differently below)
+            apiCallParams.max_tokens = Number(liveConfig.promptConfig.responseLength);
+        }
+
+        if (isCCSelected) {
+            logger.warn(`endpoint: ${liveAPI.endpoint}`)
+            if (liveAPI.endpoint.includes('openai.com')) { //max_output_tokens for OAI CC
+                apiCallParams.max_output_tokens = Number(liveConfig.promptConfig.responseLength);
+            }
+            if (!liveAPI.endpoint.includes('anthropic.com')) { //max_tokens for non-OAI CC
+                apiCallParams.max_tokens = Number(liveConfig.promptConfig.responseLength);
+            }
+
+        } 
+
+        
+    const [finalApiCallParams, entitiesList] = await setStopStrings(liveConfig, apiCallParams, includedChatObjects, liveAPI);
+
+    // Pre-stream initializer (if provided)
+    const preInit = (typeof preInitCallback === 'function') ? preInitCallback : null;
+
+        //logger.info(`[getAIResponse] >> finalApiCallParams after SetStopStrings: ${JSON.stringify(finalApiCallParams)}`);
+
+        let AIChatUserList, AIResponse = '';
+        if (engineMode === 'horde') { //if horde...
+            apiCallParams.params.max_context_length = Number(liveConfig.promptConfig.contextSize);
+            apiCallParams.params.max_length = Number(liveConfig.promptConfig.responseLength);
+            AIChatUserList = await makeAIChatUserList(entitiesList, includedChatObjects);
+            if (preInit) {
+                try { await preInit({ AIChatUserList, lastInContextMessageID }); } catch (_) { /* ignore */ }
+            }
+
+            finalApiCallParams.models = [liveConfig.promptConfig.selectedHordeWorker];
+            const [hordeResponse] = await requestToHorde(hordeKey, finalApiCallParams);
+            AIResponse = hordeResponse;
+
+            return [AIResponse, AIChatUserList];
+        } else { //if TC or CC
+            AIChatUserList = await makeAIChatUserList(entitiesList, includedChatObjects);
+            if (preInit) {
+                try { await preInit({ AIChatUserList, lastInContextMessageID }); } catch (_) { /* ignore */ }
+            }
+            //logger.warn('getting rawResponse for stream')
+            let rawResponse = await requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, includedChatObjects, false, liveConfig, parsedMessage, formattedCharName, lastInContextMessageID);
+            //logger.warn('finished getting rawResponse..., moving on..');
+
+            //logger.warn('finalApiCallParams.stream (after requestToTCorCC):', finalApiCallParams.stream);
+            //logger.warn('checking if we are in a stream or not? ', finalApiCallParams.stream);
+            if (!finalApiCallParams.stream) { //if not streaming..
+                //logger.warn('no stream, returning rawResponse as a whole chunk');
+                AIResponse = await postProcessText(trimIncompleteSentences(rawResponse));
+                const displayNameForSave = (liveConfig?.promptConfig?.selectedCharacterDisplayName) || charName;
+                await db.upsertChar(charName, displayNameForSave, user.color); // upsert with card id and current display name
+                // IMPORTANT: Do not write the AI message here. The orchestrator (stream.js)
+                // will persist the final trimmed message and broadcast with DB metadata
+                // to avoid duplicate messages when streaming is off.
+                return [AIResponse, AIChatUserList, lastInContextMessageID];
+            } else { //if TC and stream...
+                //logger.info('it was streamed already, no need to return anything..')
+                //return null;
+                //console.warn('TC/CC stream response incoming, returning: [AIResponse, AIChatUserList]');
+                //console.warn('AIResponse:', AIResponse);
+                //console.warn('AIChatUserList:', AIChatUserList);
+                return [AIResponse, AIChatUserList]; //return this anyway for now, since it crashes without it
+            }
+        }
+    } catch (error) {
+        logger.error('Error while requesting AI response:', error);
+    }
+}
+
+
+//entityList is a set of entities drawn from setStopStrings, which gathers names for all entities in the chat history.
+//chatHistoryFromPrompt is a JSON array of chat messages which made it into the prompt for the AI, as set by addCharDefsToPrompt
+//this function compares the entity username from the set against the username in the chat object arrray
+//if a match is found, the username and associated color are added into the AIChatUserList array
+//this array is returned and sent along with the AI response, in order to populate the AI Chat UserList.
+
+//MARK: makeAIChatUserList
+async function makeAIChatUserList(entitiesList, chatHistoryFromPrompt) {
+    const chatHistoryEntities = entitiesList;
+    const fullChatDataJSON = chatHistoryFromPrompt;
+    const AIChatUserList = [];
+
+    for (const entity of chatHistoryEntities) {
+        for (const chat of fullChatDataJSON) {
+            if (chat.username === entity.username) {
+                const userColor = chat.userColor;
+                const username = chat.username;
+                const entityType = chat.entity;
+                const uuid = chat.user_id;
+                const role = chat.role;
+                AIChatUserList.push({ username: username, color: userColor, entity: entityType, uuid: uuid, role: role });
+                break; // Once a match is found, no need to continue the inner loop
+            }
+        }
+    }
+    //logger.warn(`AIChatUserList result: ${JSON.stringify(AIChatUserList)}`);
+    return AIChatUserList;
+}
+
+function countTokens(str) {
+    let chars = str.length
+    let tokens = Math.ceil(chars / 4)
+    logger.debug(`Estimated tokens: ${tokens}`)
+    return tokens
+}
+
+function trimIncompleteSentences(input, include_newline = false) {
+    if (input === undefined) { return 'Error processing response (could not trim sentences).' }
+
+    // Define true sentence terminators and trailing closers we may include after them
+    const sentenceEnders = new Set(['.', '!', '?', '。', '！', '？', '```', '...', '`']);
+    const trailingClosers = new Set(['"', "'", '”', '’', ')', '}', ']', '`', '»', '」', '】']);
+
+    const s = String(input);
+    let lastGood = -1; // index of last confirmed sentence ending (including any immediate closers)
+
+    // Scan forward to find the last complete sentence end
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (sentenceEnders.has(ch)) {
+            let j = i + 1;
+            // Allow repeated enders like '!!' or '...'
+            while (j < s.length && sentenceEnders.has(s[j])) j++;
+            // Include immediate closing quotes/brackets after the ender(s)
+            while (j < s.length && trailingClosers.has(s[j])) j++;
+            lastGood = j - 1;
+            i = j - 1; // continue after what we consumed
+        }
+    }
+
+    // If we found a valid sentence termination, cut there
+    if (lastGood !== -1) {
+        let trimmed = s.slice(0, lastGood + 1).trimEnd();
+
+        // If the final retained line contains only punctuation/quotes, drop that line
+        const punctuationForTail = new Set(['.', '!', '?', '*', '"', ')', '}', '`', ']', '$', '。', '！', '？', '”', '）', '】', '’', '」', '】', "'", '»']);
+        const lastNewline = trimmed.lastIndexOf('\n');
+        const tail = lastNewline === -1 ? trimmed : trimmed.slice(lastNewline + 1);
+        const tailNoWS = tail.replace(/[ \t\r]+/g, '');
+        if (tailNoWS.length > 0) {
+            let onlyPunct = true;
+            for (const c of tailNoWS) {
+                if (!punctuationForTail.has(c)) { onlyPunct = false; break; }
+            }
+            if (onlyPunct) {
+                trimmed = (lastNewline === -1 ? '' : trimmed.slice(0, lastNewline)).trimEnd();
+            }
+        }
+        return trimmed;
+    }
+
+    // Optionally, trim back to the last newline if no sentence enders found
+    if (include_newline) {
+        const idx = s.lastIndexOf('\n');
+        if (idx !== -1) return s.slice(0, idx).trimEnd();
+    }
+
+    // Fallback: right-trim only
+    return s.trimEnd();
+}
+
+async function ObjectifyChatHistory() {
+    return new Promise(async (resolve, reject) => {
+        await delay(100)
+        let [data, sessionID] = await db.readAIChat();
+        try {
+            // Parse the existing contents as a JSON array
+            let chatHistory = JSON.parse(data);
+            resolve(chatHistory);
+        } catch (parseError) {
+            logger.error('An error occurred while parsing the Chat History JSON:', parseError);
+            reject(parseError);
+        }
+    });
+}
+
+async function setStopStrings(liveConfig, APICallParams, includedChatObjects, liveAPI) {
+    //logger.info(`[setStopStrings] >> GO`)
+    //logger.info(APICallParams)
+    const instructData = await fio.readFile(liveConfig.promptConfig.selectedInstruct)
+    const instructSequence = JSON.parse(instructData)
+    const inputSequence = instructSequence.input_sequence
+    const outputSequence = instructSequence.output_sequence
+    const systemSequence = instructSequence.system_sequence
+    const endSequence = instructSequence.end_sequence
+    const extraStops = instructSequence?.extras_for_stops || [];
+
+    //an array of chat message objects which made it into the AI prompt context limit
+    let chatHistory = includedChatObjects;
+    //create a array of usernames and entity types to pass back for processing for AIChat UserList
+    let usernames = [];
+    const knownUsernames = new Set();
+    // Iterate over chatHistory and extract unique usernames and their entity type
+    for (const obj of chatHistory) {
+        const username = obj.username;
+        const entity = obj.entity
+        const key = `${username}_${entity}`
+        if (!knownUsernames.has(key)) {
+            knownUsernames.add(key);
+            usernames.push({ username: username, entity: entity });
+        }
+
+    }
+    let targetObj = []
+
+    let items = [inputSequence, outputSequence, systemSequence, endSequence, ...extraStops];
+    for (let item of items) {
+        if (item !== null && item !== '') {
+            targetObj.push(item);
+        }
+    }
+
+    // Generate permutations for each unique username
+    //TODO: find a sensible way to optimize this. 4 strings per entity is a lot..
+    for (const entity of usernames) {
+        targetObj.push(
+            `\n${entity.username}:`,
+            `\n ${entity.username}:`
+        );
+    }
+
+    //remove any empty items in targetObj
+    targetObj = targetObj.filter(item => item !== '');
+
+    //logger.info(APICallParams)
+    //logger.info(targetObj)
+    //   logger.debug(liveAPI)
+    //  logger.debug(liveConfig) 
+    if (liveAPI.claude === (1 || true)) { //for claude
+        //logger.info('setting Claude stop strings')
+        APICallParams.stop_sequences = targetObj
+    } else if (liveConfig.promptConfig.engineMode === 'TC' || liveConfig.promptConfig.engineMode === 'CC' && liveAPI.claude !== 1) { //for TC and OAI CC
+        //logger.info('setting TC/OAI stop strings')
+        APICallParams.stop = targetObj
+    } else { //for horde
+        logger.info('setting horde stop strings')
+        APICallParams.params.stop_sequence = targetObj
+
+    }
+    //logger.info(APICallParams)
+    //logger.info(APICallParams.params)
+    //logger.info(targetObj)
+    return [APICallParams, usernames]
+}
+
+//MARK: replaceMacros
+function replaceMacros(string, username = null, charname = null) {
+    //logger.debug(username, charname)
+    var replacedString = string
+    if (username !== null && charname !== null) {
+        replacedString = replacedString.replace(/{{user}}/g, username);
+        replacedString = replacedString.replace(/{{char}}/g, charname);
+    }
+    return replacedString
+}
+
+function collapseNewlines(x) {
+    return x.replaceAll(/\n+/g, '\n');
+}
+
+function postProcessText(text) {
+    //logger.error('postProcessText input: ', text);
+    // Collapse multiple newlines into one
+    //text = collapseNewlines(text);
+    // Trim leading and trailing whitespace, and remove empty lines
+    //text = text.split('\n').map(l => l.trim()).filter(Boolean).join('\n');
+    // Remove carriage returns
+    text = text.replace(/\r/g, '');
+    // Normalize unicode spaces
+    text = text.replace(/\u00A0/g, ' ');
+    // Collapse multiple spaces into one (except for newlines)
+    text = text.replace(/ {2,}/g, ' ');
+    // Remove leading and trailing spaces
+    //text = text.trim();
+    //logger.error('postProcessText output: ', text);
+    return text;
+}
+
+//MARK: buildTCPrompt (extracted helper)
+// Reusable TC prompt builder so both TC (sending) and CC (estimation) can share logic.
+async function buildTCPrompt({
+    liveConfig,
+    systemPrompt,
+    systemSequence,
+    inputSequence,
+    outputSequence,
+    endSequence,
+    D1JB,
+    D4AN,
+    D0PostHistory,
+    responsePrefill,
+    chatHistory,
+    availableContextForHistory,
+    shouldContinue,
+    lastUserMesageAndCharName
+}) {
+    const ks = liveConfig?.promptConfig || {};
+    const killSystemPrompt = !!ks.killSystemPrompt;
+    const killD4AN = !!ks.killD4AN;
+    const killD1JB = !!ks.killD1JB;
+    const killD0PH = !!ks.killD0PH;
+    const killResponsePrefill = !!ks.killResponsePrefill;
+    let stringToReturn = (!killSystemPrompt ? (systemPrompt || '').trim() : '').trim();
+    // Compress special markers before rough token estimate to avoid overcounting
+    let promptTokens = approxTokensFromChars(compressSpecialMarkersForEstimation(stringToReturn));
+    availableContextForHistory = availableContextForHistory - promptTokens;
+
+    let insertedItems = [];
+    let ChatObjsInPrompt = [];
+    let lastInsertedEntity = null;
+    let lastMessageAdded;
+
+    // Helper mirrors isAssistantMsg logic in a compact way
+    const charDisplayName = (liveConfig?.promptConfig?.selectedCharacterDisplayName) || '';
+    const isAssistantLike = (obj) => {
+        const ent = (obj?.entity || '').toLowerCase();
+        if (ent) {
+            if (ent === 'assistant' || ent === 'ai' || ent === 'bot') return true;
+            if (ent === 'user' || ent === 'human') return false;
+        }
+        const uname = obj?.username || '';
+        return uname === charDisplayName;
+    };
+
+    for (let i = chatHistory.length - 1; i >= 0; i--) {
+        let obj = chatHistory[i];
+        let newItem = isAssistantLike(obj)
+            ? `${endSequence}${outputSequence}${obj.username}: ${postProcessText(obj.content)}`
+            : `${endSequence}${inputSequence}${obj.username}: ${postProcessText(obj.content)}`;
+
+    let newItemTokens = approxTokensFromChars(compressSpecialMarkersForEstimation(newItem));
+        if (availableContextForHistory - newItemTokens > 0) {
+            availableContextForHistory -= newItemTokens;
+            lastMessageAdded = obj.messageID;
+            ChatObjsInPrompt.push(obj);
+            insertedItems.push(newItem);
+            if (lastInsertedEntity === null) {
+                lastInsertedEntity = isAssistantLike(obj) ? 'Assistant' : 'Human';
+            }
+        } else {
+            break;
+        }
+    }
+
+    insertedItems.reverse();
+    let numOfObjects = insertedItems.length;
+    let positionForD4AN = numOfObjects - 4;
+    let positionForD1JB = numOfObjects - 1;
+    let positionForD0PostHistory = numOfObjects;
+
+    if (shouldContinue) {
+        positionForD4AN -= 1;
+        positionForD1JB -= 1;
+        positionForD0PostHistory -= 1;
+    }
+
+    if (!killD4AN && D4AN && D4AN.length > 0) {
+        if (insertedItems.length < positionForD4AN) {
+            insertedItems.splice(0, 0, `${endSequence}${systemSequence}${D4AN}`);
+        } else {
+            insertedItems.splice(positionForD4AN, 0, `${endSequence}${systemSequence}${D4AN}`);
+            positionForD1JB += 1;
+            positionForD0PostHistory += 1;
+        }
+    }
+    if (!killD1JB && D1JB && D1JB.length > 0) {
+        if (insertedItems.length < positionForD1JB) {
+            insertedItems.splice(1, 0, `${endSequence}${systemSequence}${D1JB}`);
+        } else {
+            insertedItems.splice(positionForD1JB, 0, `${endSequence}${systemSequence}${D1JB}`);
+            positionForD0PostHistory += 1;
+        }
+    }
+    if (!killD0PH && D0PostHistory && D0PostHistory.length > 0) {
+        insertedItems.splice(positionForD0PostHistory, 0, `${endSequence}${systemSequence}${D0PostHistory}`);
+    }
+
+    let insertedChatHistory = insertedItems.join('');
+    stringToReturn += insertedChatHistory;
+
+    if (!(shouldContinue === true && lastInsertedEntity === 'Assistant')) {
+        stringToReturn += `${endSequence}`;
+    }
+
+    if (shouldContinue === true && lastInsertedEntity === 'Assistant') {
+        stringToReturn = postProcessText(stringToReturn) + ' ';
+    } else {
+        stringToReturn += `${outputSequence}`;
+        stringToReturn += (lastUserMesageAndCharName || '').trim();
+        if (!killResponsePrefill && responsePrefill && responsePrefill.length > 0) {
+            stringToReturn += ` ${responsePrefill}`;
+        }
+    }
+
+    stringToReturn = postProcessText(stringToReturn);
+    return [stringToReturn, ChatObjsInPrompt, lastMessageAdded];
+}
+
+//MARK: addCharDefsToPrompt
+// this function does a lot more than just add character definitions to the prompt.
+// it also crafts the entire prompt, including system message, dynamic insertions, chat history, and the last user message.
+// it contains methods for TC and CC; this really should be split up somehow.
+async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharName, username, liveAPI, shouldContinue, continueTarget = null, userPersona = '') {
+    //logger.debug(`[addCharDefsToPrompt] >> GO`)
+    //logger.debug(liveAPI)
+    let isClaude = liveAPI.claude
+    let isCCSelected = liveAPI.type === 'CC' ? true : false
+    let doD4CharDefs = liveConfig.promptConfig.D4CharDefs
+    //logger.info(doD4CharDefs)
+
+
+    //logger.debug(`addCharDefsToPrompt: ${username}`)
+    return new Promise(async function (resolve, reject) {
+        try {
+            // Guard: only allow definition load if character is currently active
+            const activeEntries = (liveConfig?.promptConfig?.selectedCharacters || []).filter(c => c.value && c.value !== 'None');
+            const isActive = activeEntries.some(c => c.value === charFile);
+            const responseLengthTokens = Number(liveConfig.promptConfig.responseLength);
+            const contextSize = Number(liveConfig.promptConfig.contextSize);
+            let availableContextForHistory = contextSize - responseLengthTokens;
+            let lastMessageAdded; //this will be the marker we pass back to set the context limit style
+            if (!isActive) {
+                logger.warn(`[CharDefs] Attempt to load defs for non-active character: ${charFile}. Skipping.`);
+                return resolve(['', [], null]);
+            }
+
+            let charData = null;
+            const skipDefs = !!(typeof continueTarget === 'object' && continueTarget && continueTarget.skipCharDefs);
+            if (!skipDefs) {
+                charData = await fio.charaRead(charFile, 'png')
+            } else {
+                // Minimal stub to allow macro replacement without pulling defs
+                charData = JSON.stringify({ name: liveConfig.promptConfig.selectedCharacterDisplayName || 'Character', description: '', data: { name: liveConfig.promptConfig.selectedCharacterDisplayName || 'Character', description: '', first_mes: '' } });
+            }
+            let chatHistory = await ObjectifyChatHistory()
+            if (continueTarget && continueTarget.sessionID) {
+                // Truncate chat history to include only messages up to and including the target mesID
+                try {
+                    const targetId = Number(continueTarget.mesID);
+                    if (!Number.isNaN(targetId)) {
+                        const truncated = [];
+                        for (const m of chatHistory) {
+                            truncated.push(m);
+                            if (m.messageID === targetId) break;
+                        }
+                        if (truncated.length > 0) chatHistory = truncated;
+                    }
+                } catch (e) {
+                    logger.debug('[Continue] Failed to truncate chat history:', e.message);
+                }
+            }
+            let ChatObjsInPrompt = []
+
+            //replace {{user}} and {{char}} for character definitions
+            const charJSON = JSON.parse(charData)
+            const charName = charJSON.name
+            const charDisplayName = (liveConfig?.promptConfig?.selectedCharacterDisplayName) || charName;
+            const jsonString = JSON.stringify(charJSON);
+            let replacedString = postProcessText(replaceMacros(jsonString, username, charJSON.name))
+            const replacedData = JSON.parse(replacedString);
+
+            let descToAdd = replacedData.description.length > 0 ? `\n${replacedData.description.trim()}` : ''
+            
+            // Inject User Personas
+            const personas = new Map();
+            if (chatHistory && Array.isArray(chatHistory)) {
+                chatHistory.forEach(msg => {
+                    if (msg.entity === 'user' && msg.persona && msg.persona.trim()) {
+                        personas.set(msg.username, msg.persona.trim());
+                    }
+                });
+            }
+            if (username && userPersona) {
+                personas.set(username, userPersona);
+            }
+            
+            if (personas.size > 0) {
+                descToAdd += '\n\n[User Personas]\n';
+                personas.forEach((p, u) => {
+                    descToAdd += `${u}: ${p}\n`;
+                });
+            }
+            //const personalityToAdd = replacedData.personality.length > 0 ? `\n${replacedData.personality.trim()}` : ''
+            //const scenarioToAdd = replacedData.scenario.length > 0 ? `\n${replacedData.scenario.trim()}` : ''
+
+            //replace {{user}} and {{char}} for D1JB
+            const ks = liveConfig?.promptConfig || {};
+            const killSystemPrompt = !!ks.killSystemPrompt;
+            const killD4AN = !!ks.killD4AN;
+            const killD1JB = !!ks.killD1JB;
+            const killD0PH = !!ks.killD0PH;
+            const killResponsePrefill = !!ks.killResponsePrefill;
+
+            var D1JB = postProcessText(replaceMacros(liveConfig.promptConfig.D1JB, username, charJSON.name)) || ''
+            var D4AN = postProcessText(replaceMacros(liveConfig.promptConfig.D4AN, username, charJSON.name)) || ''
+            var D0PostHistory = postProcessText(replaceMacros(liveConfig.promptConfig.D0PostHistory, username, charJSON.name)) || ''
+            var responsePrefill = postProcessText(replaceMacros(liveConfig.promptConfig.responsePrefill, username, charJSON.name)) || ''
+            
+            // ================================
+            // WORLD INFO / LOREBOOK ACTIVATION
+            // ================================
+            let worldInfoContent = '';
+            let worldInfoTokens = 0;
+            try {
+                const scanDepth = liveConfig?.lorebook?.scanDepth || 5;
+                const tokenBudget = liveConfig?.lorebook?.tokenBudget || 500;
+                
+                const { activatedEntries, totalTokens, matched } = await lorebook.getActivatedEntries(chatHistory, {
+                    scanDepth,
+                    tokenBudget,
+                    caseSensitive: false,
+                    includeNames: true
+                });
+                
+                if (activatedEntries && activatedEntries.length > 0) {
+                    worldInfoContent = lorebook.formatEntriesForPrompt(activatedEntries, {
+                        separator: '\n',
+                        wrapWithBrackets: true
+                    });
+                    worldInfoContent = postProcessText(replaceMacros(worldInfoContent, username, charJSON.name));
+                    worldInfoTokens = totalTokens;
+                    logger.info(`[WorldInfo] Injecting ${activatedEntries.length} entries (~${worldInfoTokens} tokens) into prompt`);
+                }
+            } catch (wiErr) {
+                logger.error('[WorldInfo] Error during activation scan:', wiErr.message);
+            }
+            
+            // Prepend World Info to D4AN if we have activated entries
+            if (worldInfoContent.length > 0) {
+                D4AN = `${worldInfoContent}\n${D4AN}`;
+            }
+            
+            if (doD4CharDefs && descToAdd.length > 0) {
+                D4AN = `${descToAdd}\n${D4AN}`
+            }
+
+            var systemMessage = postProcessText(replaceMacros(liveConfig.promptConfig.systemPrompt, username, charJSON.name)) || `You are ${charName}. Write ${charName}'s next response to interact with ${username}.`
+            const instructData = await fio.readFile(liveConfig.promptConfig.selectedInstruct)
+            const instructSequence = JSON.parse(instructData)
+            const inputSequence = replaceMacros(instructSequence.input_sequence, username, charJSON.name)
+            const outputSequence = replaceMacros(instructSequence.output_sequence, username, charJSON.name)
+            const systemSequence = replaceMacros(instructSequence.system_sequence, username, charJSON.name)
+            const endSequence = replaceMacros(instructSequence.end_sequence, username, charJSON.name)
+
+            if (!doD4CharDefs) {
+                var systemPrompt = `${systemSequence}${systemMessage}${descToAdd}`
+                var systemPromptforCC = `${systemMessage}${descToAdd}`
+            } else {
+                var systemPrompt = `${systemSequence}${systemMessage}`
+                var systemPromptforCC = `${systemMessage}`
+            }
+            if (killSystemPrompt) { systemPrompt = ''; systemPromptforCC = ''; }
+            if (killD4AN) { D4AN = ''; }
+            if (killD1JB) { D1JB = ''; }
+            if (killD0PH) { D0PostHistory = ''; }
+            if (killResponsePrefill) { responsePrefill = ''; }
+
+            // Helper to robustly determine if a chat entry is from the assistant
+            const isAssistantMsg = (obj) => {
+                //logger.warn('checking isAssistantMsg for:', JSON.stringify(obj));
+                const ent = (obj?.entity || '').toLowerCase();
+                if (ent) {
+                    //logger.warn(`isAssistantMsg? ${ent} -- charName: ${charName}, charDisplayName: ${charDisplayName}`);
+                    if (ent === 'assistant' || ent === 'ai' || ent === 'bot') return true;
+                    if (ent === 'user' || ent === 'human') return false;
+                }
+                const uname = obj?.username || '';
+                logger.warn(`isAssistantMsg? ${ent} -- uname: ${uname}, charName: ${charName}, charDisplayName: ${charDisplayName}`);
+                return uname === charName || uname === charDisplayName;
+            };
+
+            //logger.info("CC?", isCCSelected, "claude?", isClaude, "horde?", liveConfig.promptConfig.engineMode === 'horde');
+            if (liveConfig.promptConfig.engineMode !== 'horde' && !isCCSelected) { //MARK: TC Prompt Build
+                logger.info('Adding Text Completion style message objects into prompt')
+                const [tcString, tcChatObjs, tcLastMsgId] = await buildTCPrompt({
+                    liveConfig,
+                    systemPrompt,
+                    systemSequence,
+                    inputSequence,
+                    outputSequence,
+                    endSequence,
+                    D1JB,
+                    D4AN,
+                    D0PostHistory,
+                    responsePrefill: (!shouldContinue && responsePrefill) ? responsePrefill : '',
+                    chatHistory,
+                    availableContextForHistory,
+                    shouldContinue,
+                    lastUserMesageAndCharName
+                });
+                // Optional: Use API tokenization endpoint to fit within TC budget by culling oldest history via binary search
+                logger.info(`TC prompt built; length ${tcString.length} chars. Estimating tokens...`);
+                //logger.info('isClaude?', isClaude, 'liveAPI?.useTokenizer:', liveAPI?.useTokenizer);
+                
+                if (!isClaude && liveAPI?.useTokenizer) {
+                    logger.info('using remote tokenizer for TC prompt culling');
+                    try {
+                        // Calculate TC budget: contextSize - responseLength - small margin
+                        const tcBudget = Math.max(0, Number(liveConfig.promptConfig.contextSize) - Number(liveConfig.promptConfig.responseLength) - 32);
+
+                        async function countTokensTextByAPI(text) {
+                            //logger.info('counting tokens for text:', text);
+                            const count = await tryRemoteTokenize(text, liveAPI);
+                            //logger.info('counted tokens for text:', text, 'count:', count);
+                            if (typeof count === 'number') return count;
+                            throw new Error('Tokenize endpoint returned unexpected result');
+                        }
+
+                        // Helper to rebuild a TC prompt with a drop of the earliest K history messages
+                        async function buildTCWithDrop(dropK) {
+                            const historyTail = (chatHistory || []).slice(dropK);
+                            // Use a huge availableContextForHistory to force inclusion of all history in this candidate
+                            const HUGE = 1e9;
+                            const [candidate, candidateObjs] = await buildTCPrompt({
+                                liveConfig,
+                                systemPrompt,
+                                systemSequence,
+                                inputSequence,
+                                outputSequence,
+                                endSequence,
+                                D1JB,
+                                D4AN,
+                                D0PostHistory,
+                                responsePrefill: (!shouldContinue && responsePrefill) ? responsePrefill : '',
+                                chatHistory: historyTail,
+                                availableContextForHistory: HUGE,
+                                shouldContinue,
+                                lastUserMesageAndCharName
+                            });
+                            return [candidate, candidateObjs];
+                        }
+
+                        // First try the built prompt
+                        let lastCount;
+                        try {
+                            lastCount = await countTokensTextByAPI(tcString);
+                        } catch (e) {
+                            logger.info('[Tokenize-TC] Failed initial count; skipping API tokenization path. Reason:', e.message);
+                            throw e;
+                        }
+                        if (typeof lastCount === 'number') {
+                            logger.info(`[Tokenize-TC] Full prompt tokens via API: ${lastCount}, budget ${tcBudget}`);
+                        }
+                        let finalString = tcString, finalObjs = tcChatObjs, finalLastId = tcLastMsgId;
+                        if (typeof lastCount === 'number' && lastCount > tcBudget) {
+                            // Binary search over how many earliest history messages to drop
+                            let low = 0, high = (chatHistory || []).length, best = null;
+                            while (low <= high) {
+                                const mid = Math.floor((low + high) / 2);
+                                const [candText, candObjs] = await buildTCWithDrop(mid);
+                                let cnt;
+                                try {
+                                    cnt = await countTokensTextByAPI(candText);
+                                } catch (e) {
+                                    logger.debug('[Tokenize-TC] count failed during search, treating as too large:', e.message);
+                                    cnt = Number.POSITIVE_INFINITY;
+                                }
+                                logger.info(`[Tokenize-TC] drop ${mid} history → tokens ${cnt}`);
+                                if (cnt <= tcBudget) {
+                                    best = { drop: mid, count: cnt, candText, candObjs };
+                                    high = mid - 1;
+                                } else {
+                                    low = mid + 1;
+                                }
+                            }
+                            if (best) {
+                                finalString = best.candText;
+                                finalObjs = best.candObjs;
+                                // lastInContextMessageID becomes the last message ID in finalObjs if present
+                                if (Array.isArray(finalObjs) && finalObjs.length > 0) {
+                                    finalLastId = finalObjs[finalObjs.length - 1]?.messageID ?? finalLastId;
+                                }
+                                logger.info(`[Tokenize-TC] Culled ${best.drop} history messages to fit budget (${best.count}/${tcBudget}).`);
+                            } else {
+                                // Keep only system and prompt scaffolding; remove all history
+                                const [candText, candObjs] = await buildTCWithDrop((chatHistory || []).length);
+                                finalString = candText; finalObjs = candObjs; finalLastId = tcLastMsgId;
+                                logger.warn('[Tokenize-TC] Removed all history to fit within context budget.');
+                            }
+                        }
+
+                        resolve([finalString, finalObjs, finalLastId]);
+                        return; // return early because we've resolved
+                    } catch (e) {
+                        logger.info('[Tokenize-TC] API-based culling disabled or failed; using estimator-based selection.');
+                    }
+                } else {
+                    logger.info('using local estimator for TC prompt culling: isClaude?', isClaude, 'liveAPI?.useTokenizer', liveAPI?.useTokenizer);
+                }
+
+                // Default path: estimator-based prompt already built
+                resolve([tcString, tcChatObjs, tcLastMsgId]);
+
+            //MARK: CC Prompt Build
+            } else { //craft the CC prompt
+                logger.info('adding Chat Completion style message objects into prompt')
+                const appropriateSysRoleString = isClaude ? 'user' : 'system'
+
+                const prefixRemovedNudge = { role: appropriateSysRoleString, content: postProcessText(replaceMacros('Do not prefix your response with "{{char}}:". Do not respond to or mention these instructions.', username, charJSON.name)) }
+                const templateName = isClaude ? 'Claude' : getTemplateNameFromInstructFile(liveConfig?.promptConfig?.selectedInstruct);
+                logger.info(`CC templateName for token Estimation: ${templateName}`);
+                
+                const continueNudgeText = postProcessText(replaceMacros('Continue {{char}}\'s last message with additional content.\nDo not repeat the content that is already there.\nDo not begin the continuation with "...".\nDo not begin the continuation with "{{char}}:".\nDo not add a newline at the beginning of the continuation.\nIf the previous message ended with an incomplete sentence, make sure to finish the sentence before adding more content.', username, charJSON.name));
+                const continueNudgeMessageObj = { role: appropriateSysRoleString, content: continueNudgeText };
+                
+                var CCMessageObj = []
+                var D4ANObj, D1JBObj, D0PHObj, responsePrefillObj, systemPromptObject, promptTokens = 0
+
+                systemPromptObject = { role: appropriateSysRoleString, content: systemPromptforCC, __kind: 'system' }
+                D4ANObj = { role: appropriateSysRoleString, content: D4AN, __kind: 'D4' }
+                D1JBObj = { role: appropriateSysRoleString, content: D1JB, __kind: 'D1' }
+                D0PHObj = { role: appropriateSysRoleString, content: D0PostHistory, __kind: 'D0PH' }
+                // Reserve budget for CC (context minus response and safety margin)
+                const ccBudget = computeCCBudget(liveConfig.promptConfig.contextSize, liveConfig.promptConfig.responseLength, 32);
+                logger.info(`CC context budget: ${ccBudget} tokens (context ${liveConfig.promptConfig.contextSize} - response ${liveConfig.promptConfig.responseLength} - margin 32)`);
+                // In remote tokenizer mode, we skip all local token estimation for system/prefix/prefill
+                if (!(!isClaude && liveAPI?.useTokenizer)) {
+                    // Use per-block render to count only the system block accurately (no ceil in state)
+                    promptTokens = estimateCCSystemTokensByRender(systemPromptforCC, templateName);
+                    logger.info(`Top level system prompt is: ~${promptTokens.toFixed(2)} tokens`)
+                }
+
+                let D4Added = false,
+                    D1Added = false,
+                    D0PHAdded = false
+                let shouldAddD4 = false
+                let shouldAddD1 = false
+                let shouldAddD0PH = false
+                let D4Loc, D1Loc, D0PHLoc
+                if (isClaude) {
+                    D4Loc = 3
+                    D1Loc = 1
+                    D0PHLoc = 0
+                } else {
+                    D4Loc = 4
+                    D1Loc = 2
+                    D0PHLoc = 1
+                }
+
+                const remoteMode = (!isClaude && liveAPI?.useTokenizer);
+
+                // Reserve assistant primer up-front (backend implicitly adds this) — skip estimation in remote mode
+                if (!remoteMode) {
+                    const assistantPrimerUnits = estimateCCAssistantPrimerTokensByRender(templateName);
+                    promptTokens += assistantPrimerUnits;
+                    logger.info(`Reserved assistant primer: ${assistantPrimerUnits.toFixed(2)}; running total ~${promptTokens.toFixed(2)}`);
+                }
+
+                //if we are continuing or have a prefill, we'll get extra messages below, so...
+                if (shouldContinue || responsePrefill.length > 0) { 
+                    logger.info('Continue or prefill path selected');
+                    // In remote mode, skip local estimation for continue-nudge; still adjust insertion positions
+                    if (!remoteMode) {
+                        const nudgeUnits = estimateCCMessageTokensByRender(continueNudgeMessageObj, templateName);
+                        promptTokens += nudgeUnits;
+                        logger.info(`Reserved ${nudgeUnits.toFixed(2)} tokens for continue-nudge, now at ~${promptTokens.toFixed(2)}`);
+                    }
+                    //move insertion locations up by one
+                    D0PHLoc = D0PHLoc + 1;
+                    D1Loc = D1Loc + 1;
+                    D4Loc = D4Loc + 1;
+                } else { //we will add the prefix removal instructions instead
+                    logger.info('Prefix-removal nudge path selected');
+                    if (!remoteMode) {
+                        const nudgeUnits = estimateCCMessageTokensByRender(prefixRemovedNudge, templateName);
+                        promptTokens += nudgeUnits;
+                        logger.info(`Reserved ${nudgeUnits.toFixed(2)} tokens for prefix-removal nudge, now at ~${promptTokens.toFixed(2)}`);
+                    }
+                }
+
+                // Always reserve tokens for responsePrefill (if present and not continuing)
+                const addPrefill = (responsePrefill && responsePrefill.length > 0 && !shouldContinue);
+                let prefillObjForReserve = null;
+                if (addPrefill) {
+                    prefillObjForReserve = { role: 'assistant', content: `${charDisplayName}: ${responsePrefill}`, __kind: 'prefill' };
+                    if (!remoteMode) {
+                        logger.info('Reserving tokens for response prefill:');
+                        const prefillUnits = estimateCCMessageTokensByRender(prefillObjForReserve, templateName);
+                        promptTokens += prefillUnits;
+                        logger.info(`Reserved ${prefillUnits.toFixed(2)} tokens for response prefill, promptTokens now at ~${promptTokens.toFixed(2)}`);
+                    }
+                }
+
+                logger.warn('shouldContinue:', shouldContinue, 'D4Loc:', D4Loc, 'D1Loc:', D1Loc, 'D0PHLoc:', D0PHLoc)
+                if (!remoteMode) {
+                    logger.info(`after reserving for nudges and prefill, Prompt is: ~${promptTokens}`)
+                }
+
+                // Optional: one-shot calibration with remote tokenizer for this request
+                // Set env STMP_TOKENIZER_URL to enable; gated by STMP_TOKEN_CALIBRATE !== '0'
+                let calibrationFactor = 1.0;
+                const doCalibrate = (!remoteMode && liveAPI?.useTokenizer && (templateName !== 'None' && templateName !== 'Claude'));
+                if (doCalibrate) {
+                    try {
+                        const previewMessages = [];
+                        // Compose a minimal preview prompt: system + nudges + prefill (if any), no history yet
+                        if (systemPromptObject?.content) previewMessages.push({ role: appropriateSysRoleString, content: systemPromptforCC });
+                        if (addPrefill && prefillObjForReserve) previewMessages.push(prefillObjForReserve);
+                        previewMessages.push(shouldContinue || (responsePrefill && responsePrefill.length > 0) ? continueNudgeMessageObj : prefixRemovedNudge);
+                        const renderedPreview = buildRenderedCCPrompt(previewMessages, '', templateName, true);
+                        const estUnitsPreview = promptTokens; // we've already summed these blocks into promptTokens
+                        calibrationFactor = await calibrateFactor(renderedPreview, estUnitsPreview, liveAPI);
+                    } catch (e) {
+                        logger.debug('[CC] calibration failed or skipped:', e.message);
+                        calibrationFactor = 1.0;
+                    }
+                }
+
+                if (!remoteMode) {
+                for (let i = chatHistory.length - 1; i >= 0; i--) {
+                    logger.info(`processing chat history item ${i}`)
+                    let obj = chatHistory[i];
+                    //logger.info(`obj: ${obj}`);
+
+                    if (chatHistory.length < 4) { //if chat history is less than 4 turns, add D4 and D1 into first user obj
+                        logger.info(`Chat history is less than 4 turns, adding D4 and D1 to first user message`)
+                        if (obj.entity === 'user' && D4ANObj.content.length > 0 && D4Added === false) {
+                            obj.content = `${D4ANObj.content}\n` + obj.content
+                            D4Added = true
+                            logger.info(`Added D4 content to user message: ${obj.content}`)
+                        }
+                        if (obj.entity === 'user' && D1JBObj.content.length > 0 && D1Added === false) {
+                            obj.content = `${D1JBObj.content}\n` + obj.content
+                            D1Added = true
+                            logger.info(`Added D1 content to user message: ${obj.content}`)
+                        }
+                        if (obj.entity === 'user' && D0PHObj.content.length > 0 && D0PHAdded === false) {
+                            obj.content = `${D0PHObj.content}\n` + obj.content
+                            D0PHAdded = true
+                            logger.info(`Added D0PH content to user message: ${obj.content}`)
+                        }
+                    }
+
+                    let newItem, newObj, newItemTokens
+
+                    if (!isClaude && i === chatHistory.length - D4Loc && D4ANObj.content.length > 0 && D4Added === false) {
+                        logger.warn('saw D4 incoming')
+                        shouldAddD4 = true
+                        logger.warn('adding D4')
+                        const D4Units = estimateCCMessageTokensByRender(D4ANObj, templateName);
+                        CCMessageObj.push(D4ANObj)
+                        D4Added = true
+                        shouldAddD4 = false
+                        D1Loc = D1Loc + 1
+                        D0PHLoc = D0PHLoc + 1
+                        promptTokens += D4Units
+                    }
+                    if (i === chatHistory.length - D1Loc && D1JBObj.content.length > 0 && D1Added === false) {
+                        shouldAddD1 = true
+                        logger.warn('adding D1')
+                        const D1Units = estimateCCMessageTokensByRender(D1JBObj, templateName);
+                        CCMessageObj.push(D1JBObj)
+                        D1Added = true
+                        shouldAddD1 = false
+                        D0PHLoc = D0PHLoc + 1
+                        promptTokens += D1Units
+                    }
+                    if (i === chatHistory.length - D0PHLoc && D0PHObj.content.length > 0 && D0PHAdded === false) {
+                        shouldAddD0PH = true
+                        logger.warn('adding D0PH')
+                        const D0Units = estimateCCMessageTokensByRender(D0PHObj, templateName);
+                        CCMessageObj.push(D0PHObj)
+                        D0PHAdded = true
+                        shouldAddD0PH = false
+                        promptTokens += D0Units
+                    }
+
+                    if (isAssistantMsg(obj)) {
+                            newObj = {
+                                role: 'assistant',
+                                content: `${obj.username}: ${postProcessText(obj.content)}`,
+                                __kind: 'history'
+                            }
+                            if (templateName !== 'None' && templateName !== 'Claude') {
+                                const msgUnits = estimateCCMessageTokensByRender(newObj, templateName) * calibrationFactor;
+                                logger.info('Before adding new item', promptTokens.toFixed(2), 'of', ccBudget);
+                                logger.info('Message units for this object:', msgUnits.toFixed(2));
+                                newItemTokens = msgUnits;
+                            } else {
+                                newItemTokens = estimateMessageTokens_CC(newObj, templateName);
+                            }
+
+                    } else { //for non-Assistant messages
+
+                        newObj = {
+                            role: 'user',
+                            content: `${obj.username}: ${postProcessText(obj.content)}`,
+                            __kind: 'history'
+                        }
+                        if (templateName !== 'None' && templateName !== 'Claude') {
+                            const msgUnits = estimateCCMessageTokensByRender(newObj, templateName) * calibrationFactor;
+                            logger.info('Before adding new item', promptTokens.toFixed(2), 'of', ccBudget);
+                            logger.info('Message units for this object:', msgUnits.toFixed(2));
+                            newItemTokens = msgUnits;
+                        } else {
+                            newItemTokens = estimateMessageTokens_CC(newObj, templateName);
+                        }
+
+                        if (isClaude) { //for Claude
+                            //logger.warn(JSON.stringify(obj))
+                            if (shouldAddD4 === true) {
+                                logger.info('added d4')
+                                newObj.content = D4ANObj.content + `\n` + newObj.content
+                                D4Added = true
+                                shouldAddD4 = false
+                                logger.info(newObj.content)
+                            }
+                            if (shouldAddD1 === true) {
+                                logger.info('added d1')
+                                newObj.content = D1JBObj.content + `\n` + newObj.content
+                                D1Added = true
+                                shouldAddD1 = false
+                            }
+                            if (shouldAddD0PH === true) {
+                                logger.info('added D0PH')
+                                newObj.content = D0PHObj.content + `\n` + newObj.content
+                                D0PHAdded = true
+                                shouldAddD0PH = false
+                            }
+                            logger.error(chatHistory[i - 1]);
+                            if (chatHistory[i].role === obj.entity) { // if prev and current are both 'user'
+                                chatHistory[i].content = chatHistory[i - 1]?.content + `\n` + obj.content //just combine the content
+                            }
+                            else {
+                                newObj = {
+                                    role: 'user',
+                                    content: postProcessText(obj.content),
+                                    __kind: 'history'
+                                }
+                                if (templateName !== 'None' && templateName !== 'Claude') {
+                                    const msgUnits = estimateCCMessageTokensByRender(newObj, templateName) * calibrationFactor;
+                                    logger.info('Message units for this object:', msgUnits.toFixed(2));
+                                    newItemTokens = msgUnits;
+                                } else {
+                                    logger.info(`ESTIMATING CC MESSAGE TOKENS BY CHAR! ---- CC templateName for token Estimation: ${templateName}`);
+                                    newItemTokens = estimateMessageTokens_CC(newObj, templateName);
+                                }
+                            }
+                        }
+                    }
+
+                    if (promptTokens + newItemTokens <= ccBudget) {
+                        promptTokens += newItemTokens;
+                        CCMessageObj.push(newObj)
+                        ChatObjsInPrompt.push(obj)
+                        logger.info(`added new item ${i} of ${chatHistory.length}, tokens ${newItemTokens.toFixed(2)}, prompt tokens: ~${promptTokens.toFixed(2)}`);
+                        logger.info(`--------------------------------`);
+                    } else {
+                        logger.info('ran out of context space (CC budget)', { promptTokens, newItemTokens, ccBudget })
+                        break;
+                    }
+                }
+                }
+                // In remote mode, skip local assembly; we'll assemble/cull below
+                if (!remoteMode) {
+                    if (systemPromptObject.content.length > 0) {
+                        CCMessageObj.push(systemPromptObject)
+                    }
+                    CCMessageObj = CCMessageObj.reverse();
+                    // Always add prefill if reserved above
+                    if (addPrefill) {
+                        CCMessageObj.push(prefillObjForReserve)
+                    }
+                    // Add appropriate nudge
+                    if (shouldContinue || responsePrefill.length > 0) {
+                        CCMessageObj.push({ ...continueNudgeMessageObj, __kind: 'nudge' })
+                    } else {
+                        CCMessageObj.push({ ...prefixRemovedNudge, __kind: 'nudge' })
+                    }
+                }
+
+                // Optional: Use API tokenization endpoint to fit within ccBudget by culling oldest history via binary search
+                if (!isClaude && liveAPI?.useTokenizer) {
+                    try {
+                        async function countTokensByAPI(messagesArr) {
+                            const msgsForRender = (messagesArr || []).filter(m => m.__kind !== 'system').map(({ role, content }) => ({ role, content }));
+                            const rendered = buildRenderedCCPrompt(msgsForRender, systemPromptforCC, templateName, true);
+                            const count = await tryRemoteTokenize(rendered, liveAPI);
+                            if (typeof count === 'number') return count;
+                            throw new Error('Tokenize endpoint returned unexpected result');
+                        }
+
+                        // Helper to assemble CC messages freshly from a history tail so non-history items are positioned correctly
+                        function assembleCCFromHistoryTail(historyTail) {
+                            let msgs = [];
+                            let D4Added = false, D1Added = false, D0PHAdded = false;
+                            let D4LocA = D4Loc, D1LocA = D1Loc, D0PHLocA = D0PHLoc;
+                            const tailLen = historyTail.length;
+                            const injectedPrefixes = new Map();
+                            // Small history hack: inject D4/D1/D0PH into first user message
+                            if (tailLen < 4) {
+                                for (let j = tailLen - 1; j >= 0; j--) {
+                                    const obj = historyTail[j];
+                                    if ((obj?.entity || '').toLowerCase() === 'user') {
+                                        // We won't mutate historyTail; instead remember an injected prefix for this message index
+                                        const injectedPrefix = [
+                                            (!D4Added && D4ANObj.content.length > 0) ? D4ANObj.content : null,
+                                            (!D1Added && D1JBObj.content.length > 0) ? D1JBObj.content : null,
+                                            (!D0PHAdded && D0PHObj.content.length > 0) ? D0PHObj.content : null,
+                                        ].filter(Boolean).join('\n');
+                                        if (injectedPrefix.length > 0) injectedPrefixes.set(j, injectedPrefix);
+                                        if (!D4Added && D4ANObj.content.length > 0) D4Added = true;
+                                        if (!D1Added && D1JBObj.content.length > 0) D1Added = true;
+                                        if (!D0PHAdded && D0PHObj.content.length > 0) D0PHAdded = true;
+                                        break;
+                                    }
+                                }
+                            }
+                            for (let j = tailLen - 1; j >= 0; j--) {
+                                const obj = historyTail[j];
+                                if (!isClaude && j === tailLen - D4LocA && D4ANObj.content.length > 0 && !D4Added) {
+                                    msgs.push(D4ANObj); D4Added = true; D1LocA += 1; D0PHLocA += 1;
+                                }
+                                if (j === tailLen - D1LocA && D1JBObj.content.length > 0 && !D1Added) {
+                                    msgs.push(D1JBObj); D1Added = true; D0PHLocA += 1;
+                                }
+                                if (j === tailLen - D0PHLocA && D0PHObj.content.length > 0 && !D0PHAdded) {
+                                    msgs.push(D0PHObj); D0PHAdded = true;
+                                }
+                                const ent = (obj?.entity || '').toLowerCase();
+                                const isAssist = ent === 'assistant' || ent === 'ai' || ent === 'bot' || (obj?.username === charDisplayName);
+                                const prefix = injectedPrefixes.get(j);
+                                const injected = (prefix && !isAssist) ? (prefix + '\n') : '';
+                                const contentWithInject = `${injected}${postProcessText(obj.content)}`;
+                                if (isAssist) {
+                                    msgs.push({ role: 'assistant', content: `${obj.username}: ${contentWithInject}`, __kind: 'history' });
+                                } else {
+                                    msgs.push({ role: 'user', content: `${obj.username}: ${contentWithInject}`, __kind: 'history' });
+                                }
+                            }
+                            if (systemPromptObject.content.length > 0) msgs.push(systemPromptObject);
+                            msgs = msgs.reverse();
+                            if (addPrefill) msgs.push(prefillObjForReserve);
+                            msgs.push({ ...(shouldContinue || (responsePrefill && responsePrefill.length > 0) ? continueNudgeMessageObj : prefixRemovedNudge), __kind: 'nudge' });
+                            return msgs;
+                        }
+
+                        // Seed candidate: if we skipped local assembly, build from full history tail; otherwise use current CCMessageObj
+                        if (remoteMode) {
+                            CCMessageObj = assembleCCFromHistoryTail(chatHistory || []);
+                            ChatObjsInPrompt = (chatHistory || []).slice().reverse();
+                        }
+                        // First, try full prompt
+                        let lastCount;
+                        try {
+                            lastCount = await countTokensByAPI(CCMessageObj);
+                        } catch (e) {
+                            logger.info('[Tokenize] Failed initial count; skipping API tokenization path. Reason:', e.message);
+                            throw e;
+                        }
+                        if (typeof lastCount === 'number') {
+                            logger.info(`[Tokenize] Full prompt tokens via API: ${lastCount}, budget ${ccBudget}`);
+                        }
+                        if (typeof lastCount === 'number' && lastCount > ccBudget) {
+                            // Binary search to find minimal drops to fit
+                            let low = 0, high = (chatHistory || []).length, best = null;
+                            while (low <= high) {
+                                const mid = Math.floor((low + high) / 2);
+                                const historyTail = (chatHistory || []).slice(mid);
+                                const candidate = assembleCCFromHistoryTail(historyTail);
+                                let cnt;
+                                try {
+                                    cnt = await countTokensByAPI(candidate);
+                                } catch (e) {
+                                    logger.debug('[Tokenize] count failed during search, treating as too large:', e.message);
+                                    cnt = Number.POSITIVE_INFINITY;
+                                }
+                                logger.info(`[Tokenize] drop ${mid} history → tokens ${cnt}`);
+                                if (cnt <= ccBudget) {
+                                    best = { drop: mid, count: cnt, candidate };
+                                    high = mid - 1; // try to keep more
+                                } else {
+                                    low = mid + 1; // need to drop more
+                                }
+                            }
+                            if (best) {
+                                CCMessageObj = best.candidate;
+                                // Build ChatObjsInPrompt from the selected tail (newest-first to match original behavior)
+                                const selectedTail = (chatHistory || []).slice(best.drop);
+                                ChatObjsInPrompt = selectedTail.slice().reverse();
+                                logger.info(`[Tokenize] Culled ${best.drop} history messages to fit budget (${best.count}/${ccBudget}).`);
+                            } else {
+                                // Could not fit even with all history removed; keep only non-history blocks
+                                CCMessageObj = assembleCCFromHistoryTail([]);
+                                ChatObjsInPrompt = [];
+                                logger.warn('[Tokenize] Removed all history to fit within context budget.');
+                            }
+                        }
+                    } catch (e) {
+                        // If any problem occurs, we keep the estimation-based result
+                        logger.info('[Tokenize] API-based culling disabled or failed; using estimator-based selection.');
+                    }
+                }
+
+                // Determine the boundary message (oldest included) for context highlighting
+                let lastInContextMessageID = null;
+                if (Array.isArray(ChatObjsInPrompt) && ChatObjsInPrompt.length > 0) {
+                    const oldestIncluded = ChatObjsInPrompt[ChatObjsInPrompt.length - 1];
+                    lastInContextMessageID = oldestIncluded?.messageID ?? null;
+                }
+                resolve([CCMessageObj, ChatObjsInPrompt, lastInContextMessageID]);
+            }
+
+        } catch (error) {
+            logger.error('Error reading file:', error);
+            reject(error)
+        }
+    })
+}
+
+//MARK: getHordeModelList
+async function getHordeModelList(hordekey) {
+    logger.info('Getting Horde model list...');
+    //const url = 'https://horde.koboldai.net/api/v2/workers?type=text';
+    const url = 'https://aihorde.net/api/v2/status/models?type=text&model_state=all';
+
+    var headers = {
+        'Content-Type': 'application/json',
+        'Cache': 'no-cache',
+        'apikey': hordekey,
+        "Client-Agent": "STMP:1.0.2:RossAscends"
+    };
+
+    const response = await fetch(url, {
+        method: 'GET',
+        headers: headers
+    })
+
+    const data = await response.json()
+
+    const options = data
+        .filter(item => {
+            const { eta, count } = item;
+            return eta <= 60;
+        })
+        .map(item => {
+            const { name, count, eta, queued, performance } = item
+            const modelName = name.split('/').pop(); // Extract the value after the final forward slash
+            //const { models, uncompleted_jobs, max_length, max_context_length } = item;
+            //const modelName = models[0].split('/').pop(); // Extract the value after the final forward slash
+            //const short_ctx_string = max_context_length < 1000 ? max_context_length : Math.floor(max_context_length / 1000) + "k"
+            //const short_resp_string = max_length < 1000 ? max_length : Math.floor(max_length / 1000) + "k"
+
+            return {
+                //name: `${modelName} (Q:${uncompleted_jobs}, ${short_resp_string}/${short_ctx_string})`,
+                //value: models[0]
+                name: `${modelName} (🧑‍🤝‍🧑:${queued}, ⏳:${eta}, ${performance}tps, 🤖:${count})`,
+                value: name
+
+            }
+        });
+
+    options.sort((a, b) => {
+        const etaA = parseInt(a.name.split('E:')[1]);
+        const etaB = parseInt(b.name.split('E:')[1]);
+        return etaA - etaB
+    })
+
+    /*     options.sort((a, b) => {
+            const uncompletedJobsA = parseInt(a.name.split('(Q:')[1]);
+            const uncompletedJobsB = parseInt(b.name.split('(Q:')[1]);
+            return uncompletedJobsA - uncompletedJobsB;
+        }); */
+
+    logger.info(options)
+    return options
+}
+
+//MARK: requestToHorde
+async function requestToHorde(hordeKey, stringToSend) {
+    logger.info('Sending Horde request...');
+    const url = 'https://aihorde.net/api/v2/generate/text/async';
+
+    var headers = {
+        'Content-Type': 'application/json',
+        'Cache': 'no-cache',
+        'apikey': hordeKey,
+        "Client-Agent": "STMP:1.0.2:RossAscends"
+    };
+
+    hordeKey = hordeKey || '0000000000';
+    var body = JSON.stringify(stringToSend);
+    logger.debug(`--- horde payload:`)
+    logger.info(headers)
+    logger.debug(stringToSend)
+
+    var timeout = 30000; // Timeout value in milliseconds (30 seconds)
+
+    const response = await fetch(url, {
+        method: 'POST',
+        headers: headers,
+        body: body,
+        timeout: timeout
+    })
+    const data = await response.json()
+
+    if (response.ok) {
+        var MAX_RETRIES = 240;
+        var CHECK_INTERVAL = 5000;
+        var task_id = data.id;
+        if (task_id === undefined) {
+            logger.warn('No Horde Task ID: Aborting.')
+            return ['Horde Error: No taskID', null, null, null]
+        }
+
+        logger.info(`Horde task ID ${task_id}`)
+
+        for (var retryNumber = 0; retryNumber < MAX_RETRIES; retryNumber++) {
+
+            var horde_status_url = "https://aihorde.net/api/v2/generate/text/status/" + task_id;
+            var status_headers = {
+                "Client-Agent": 'SillyTavern:UNKNOWN:Cohee#1207',
+            };
+
+            await new Promise(function (resolve) {
+                setTimeout(resolve, CHECK_INTERVAL);
+            });
+
+            var statusResponse = await (await fetch(horde_status_url, status_headers)).json()
+            if (statusResponse.is_possible === false) {
+                logger.warn('Horde said this was request impossible, check context and response size.')
+                return ['[Horde Error: Request deemed not possible. Check context and response sizes.]', null, null, null]
+            }
+            logger.info('Horde status check ' + (retryNumber + 1) + ':');
+            logger.info(statusResponse)
+            if (
+                statusResponse.done &&
+                Array.isArray(statusResponse.generations) &&
+                statusResponse.generations.length > 0
+            ) {
+                var workerName = statusResponse.generations[0].worker_name;
+                var hordeModel = statusResponse.generations[0].model;
+                var text = statusResponse.generations[0].text;
+                var kudosCost = statusResponse.kudos + 2
+                logger.info('Raw Horde response: ' + text);
+                logger.info(`Worker: ${workerName}, Model:${hordeModel}`)
+                return [text, workerName, hordeModel, kudosCost]
+            }
+        }
+    } else {
+        logger.error('Error while requesting Horde', response);
+        return response
+    };
+}
+
+//MARK: testAPI
+async function testAPI(api, liveConfig) {
+    logger.debug(`[testAPI] >> GO`)
+    logger.info('Test Message API Info:')
+    logger.info(api)
+    let testMessage = 'User: Ping? (if you can see me say "Pong!\n\nAssistant:")'
+    let payload = {
+        prompt: '',
+        stream: false, //no point to stream test messages
+        seed: undefined,
+        stop: ['.'],
+        stop_sequence: ['.'],
+        stop_sequences: ['.'],
+        max_tokens_to_sample: 50,
+        max_tokens: 50,
+        max_length: 50
+    }
+
+    let testMessageObject = [{ role: 'user', content: 'Ping? (if you can see me say "Pong!")' }]
+
+    if (api.type === 'CC' && !api.claude) {
+        payload.model = api.model
+        payload.messages = testMessageObject
+        delete payload.prompt
+    }
+
+    if (api.type === 'TC') {
+        payload.prompt = testMessage
+    }
+
+    if (api.claude) {
+        payload.model = api.model
+        let tempPrompt = payload.prompt
+    }
+
+    let result = await requestToTCorCC(false, api, payload, testMessage, true, liveConfig)
+    return result
+
+}
+
+//MARK: getModelList
+async function getModelList(api, liveConfig = null) {
+    if (liveConfig.promptConfig.engineMode === 'horde') {
+        logger.info('aborting model list request because horde is active')
+        return
+    }
+    let isClaude = api.isClaude
+    let modelsEndpoint = api.endpoint
+
+    if (!/^https?:\/\//i.test(modelsEndpoint)) {
+        if (modelsEndpoint.includes("localhost") || modelsEndpoint.includes("127.0.0.1")) {
+            // Add "http://" at the beginning
+            modelsEndpoint = "http://" + modelsEndpoint;
+        } else {
+            // Add "https://" at the beginning
+            modelsEndpoint = "https://" + modelsEndpoint;
+        }
+    }
+
+    // Check if baseURL ends with "/"
+    if (!/\/$/.test(modelsEndpoint)) {
+        // Add "/" at the end
+        modelsEndpoint += "/";
+    }
+
+
+
+    let isGemini = api.gemini || modelsEndpoint.includes('generativelanguage.googleapis.com');
+    modelsEndpoint = modelsEndpoint + 'models';
+    if (isGemini) {
+        modelsEndpoint += `?key=${api.key}`;
+    }
+
+    let key = 'Bearer ' + api.key
+
+    let headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': api.key,
+        Authorization: key
+    }
+
+    if (isClaude) {
+        headers['anthropic-version'] = '2023-06-01';
+    }
+    
+    if (isGemini) {
+        // Gemini uses key in URL, avoiding headers to prevent potential conflicts
+        delete headers['x-api-key'];
+        delete headers['Authorization'];
+    }
+
+    let args = {
+        method: 'GET',
+        headers: headers
+    }
+    logger.info(`Fetching model list from: ${modelsEndpoint}`)
+    logger.debug(modelsEndpoint)
+    logger.debug(args)
+
+    const response = await fetch(modelsEndpoint, args);
+
+    if (response.status === 200) {
+        let responseJSON = await response.json();
+        let modelNames = []; 
+
+        if (responseJSON.models) {
+             // Gemini format: { models: [{ name: "models/gemini-pro", ... }] }
+             modelNames = responseJSON.models.map(item => item.name.replace('models/', ''));
+        } else if (responseJSON.data) {
+             // Standard OpenAI format: { data: [{ id: "model-id", ... }] }
+             modelNames = responseJSON.data.map(item => item.id);
+        } else {
+             logger.warn('Got 200 OK but unknown model list format:', responseJSON);
+        }
+
+        logger.info('Available models:');
+        logger.info(modelNames);
+        return modelNames
+        //return responseJSON.data;
+    } else {
+        logger.error(`Error accessing /models endpoint. Status: ${response.status} ${response.statusText}`)
+        try {
+            const errorBody = await response.text();
+            logger.error(`Response body: ${errorBody}`);
+        } catch (e) { /* ignore */ }
+    }
+}
+
+//MARK: tryLoadModel
+async function tryLoadModel(api, liveConfig, liveAPI) {
+    if (api.gemini || liveAPI.gemini) return;
+
+    logger.info(`[tryLoadModel] >> GO`)
+
+    let isClaude = api.isClaude
+    let modelLoadEndpoint = api.endpoint
+    let selectedModel = liveConfig.APIConfig.selectedModel
+
+    if (!/^https?:\/\//i.test(modelLoadEndpoint)) {
+        if (modelLoadEndpoint.includes("localhost") || modelLoadEndpoint.includes("127.0.0.1")) {
+            // Add "http://" at the beginning
+            modelLoadEndpoint = "http://" + modelLoadEndpoint;
+        } else {
+            // Add "https://" at the beginning
+            modelLoadEndpoint = "https://" + modelLoadEndpoint;
+        }
+    }
+
+    // Check if baseURL ends with "/"
+    if (!/\/$/.test(modelLoadEndpoint)) {
+        // Add "/" at the end
+        modelLoadEndpoint += "/";
+    }
+
+    modelLoadEndpoint = modelLoadEndpoint + 'model/load'
+    let key = 'Bearer ' + api.key
+
+    let headers = {
+        'Content-Type': 'application/json',
+        'x-api-key': api.key,
+        Authorization: key
+    }
+
+    let body = JSON.stringify(
+        {
+            model_name: selectedModel,
+            num_gpu_layers: 999,
+            max_seq_len: Number(api.ctxSize),
+            cache_size: Number(api.ctxSize),
+            flash_attention: true,
+            cache_mode_k: 'Q8_0',
+            cache_mode_v: 'Q8_0',
+        })
+
+    if (isClaude) {
+        headers['anthropic-version'] = '2023-06-01';
+    }
+    let args = {
+        method: 'POST',
+        headers: headers,
+        body: body
+    }
+    logger.info(`Trying to tell the API to load model at: ${modelLoadEndpoint}`)
+    //logger.debug(modelLoadEndpoint)
+    logger.info(args)
+
+    const response = await fetch(modelLoadEndpoint, args);
+
+    if (response.status === 200) {
+        //let responseJSON = await response.json();
+        //let modelNames = responseJSON.data.map(item => item.id);
+        logger.info('Model Load response: ', response.status);
+        //logger.info(modelNames);
+        return response.status
+        //return responseJSON.data;
+    } else {
+        logger.error(`Error getting models. Code ${response.status}`)
+    }
+
+    return response
+}
+
+//MARK: requestToTCorCC
+async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, includedChatObjects, isTest, liveConfig, parsedMessage, charName, lastInContextMessageID) {
+    //logger.info('[requestToTCorCC] >> GO')
+    //logger.info('finalApiCallParams: ', finalApiCallParams)
+    const TCEndpoint = liveAPI.endpoint
+    const TCAPIKey = liveAPI.key
+    const key = TCAPIKey.trim()
+
+    const isCCSelected = liveAPI.type === 'CC' ? true : false
+    let isOpenRouter = TCEndpoint.includes('openrouter') ? true : false
+    let isOpenAI = TCEndpoint.includes('openai') ? true : false
+    let isClaude = liveAPI.claude
+    let selectedModel = liveAPI.selectedModel
+
+    //this is brought in from the sampler preset, but we don't use it yet.
+    //better to not show it in the API gen call response, would be confusing.
+    //delete finalApiCallParams.system_prompt
+
+    let baseURL = TCEndpoint.trim()
+
+    // Check if baseURL contains "localhost" or "127.0.0.1"
+    if (!/^https?:\/\//i.test(baseURL)) {
+        if (baseURL.includes("localhost") || baseURL.includes("127.0.0.1")) {
+            // Add "http://" at the beginning
+            baseURL = "http://" + baseURL;
+        } else {
+            // Add "https://" at the beginning
+            baseURL = "https://" + baseURL;
+        }
+    }
+
+    // Check if baseURL ends with "/"
+    if (!/\/$/.test(baseURL)) {
+        // Add "/" at the end
+        baseURL += "/";
+    }
+
+
+    let chatURL
+    var headers = {
+        'Content-Type': 'application/json',
+        Cache: 'no-cache',
+        'x-api-key': key,
+        Authorization: `Bearer ${key}`,
+    };
+
+    if (isCCSelected && !isClaude) { //for OAI CC
+        chatURL = baseURL + 'chat/completions'
+        delete finalApiCallParams.prompt
+    } else if (!isCCSelected) { //for TC (Tabby, KCPP, and OR?)
+        chatURL = baseURL + 'completions'
+        delete finalApiCallParams.messages
+    }
+
+    if (isClaude) {
+        chatURL = baseURL + 'messages'
+        headers['anthropic-version'] = '2023-06-01';
+        //finalApiCallParams.max_tokens_to_sample = finalApiCallParams.max_tokens
+        //delete finalApiCallParams.max_tokens
+        if (finalApiCallParams.temperature > 1) { finalApiCallParams.temperature = 1 }
+        if (liveConfig.promptConfig.systemPrompt.length > 0) {
+            finalApiCallParams.system = postProcessText(replaceMacros(liveConfig.promptConfig.systemPrompt, parsedMessage.username, charName))
+        }
+    }
+
+    if (isOpenRouter) {
+
+        headers = {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${key}`,
+            'HTTP-Referer': 'http://127.0.0.1:8181/'
+        }
+        finalApiCallParams.transforms = ['middle-out']
+        finalApiCallParams.route = 'fallback'
+    }
+
+    if (isOpenAI) {
+        logger.warn('we are using an OpenAI API, so stop will be trimmed to 4')
+        finalApiCallParams.stop = finalApiCallParams.stop.slice(0, 4);
+    }
+
+    // Gemini API handling
+    let isGemini = liveAPI.gemini || TCEndpoint.includes('generativelanguage.googleapis.com');
+    if (isGemini) {
+        // Fallback default model if none selected (e.g. during testAPI check)
+        if (!selectedModel || selectedModel === 'null' || selectedModel === 'undefined') {
+            selectedModel = 'gemini-2.5-flash';
+        }
+        
+        logger.info('Detected Gemini API, converting request format...');
+        
+        // Build Gemini-specific endpoint URL
+        // Format: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=API_KEY
+        // Or for streaming: :streamGenerateContent?alt=sse&key=API_KEY
+        let geminiBaseURL = baseURL;
+        if (!geminiBaseURL.includes('generativelanguage.googleapis.com')) {
+            // If using a proxy, construct the URL differently
+            geminiBaseURL = baseURL;
+        }
+        
+        const streamSuffix = isStreaming ? ':streamGenerateContent?alt=sse' : ':generateContent?';
+        if (geminiBaseURL.includes('generativelanguage.googleapis.com')) {
+            chatURL = `${geminiBaseURL}models/${selectedModel}${streamSuffix}&key=${key}`;
+        } else {
+            // For proxy endpoints, assume they handle the routing
+            chatURL = baseURL + (isStreaming ? 'stream' : 'generate');
+        }
+        
+        // Convert OpenAI-style messages to Gemini format
+        // Gemini format: { contents: [{ role: "user", parts: [{ text: "..." }] }] }
+        const geminiContents = [];
+        let systemInstruction = null;
+        
+        if (Array.isArray(finalApiCallParams.messages)) {
+            for (const msg of finalApiCallParams.messages) {
+                if (msg.role === 'system') {
+                    // Gemini uses systemInstruction for system prompts
+                    if (!systemInstruction) {
+                        systemInstruction = { parts: [{ text: msg.content }] };
+                    } else {
+                        systemInstruction.parts.push({ text: msg.content });
+                    }
+                } else {
+                    // Map 'assistant' to 'model' for Gemini
+                    const geminiRole = msg.role === 'assistant' ? 'model' : 'user';
+                    geminiContents.push({
+                        role: geminiRole,
+                        parts: [{ text: msg.content }]
+                    });
+                }
+            }
+        }
+        
+        // Build Gemini request body
+        const geminiParams = {
+            contents: geminiContents,
+            generationConfig: {
+                temperature: finalApiCallParams.temperature || 0.7,
+                maxOutputTokens: finalApiCallParams.max_tokens || 200,
+                topP: finalApiCallParams.top_p || 0.9,
+                topK: finalApiCallParams.top_k || 40,
+            }
+        };
+        
+        // Add system instruction if present
+        if (systemInstruction) {
+            geminiParams.systemInstruction = systemInstruction;
+        }
+        
+        // Add stop sequences if present
+        if (finalApiCallParams.stop && Array.isArray(finalApiCallParams.stop) && finalApiCallParams.stop.length > 0) {
+            geminiParams.generationConfig.stopSequences = finalApiCallParams.stop.slice(0, 5); // Gemini supports up to 5
+        }
+        
+        // Replace the params with Gemini format
+        finalApiCallParams = geminiParams;
+        
+        // Gemini doesn't use Authorization header for API key (it's in the URL)
+        headers = {
+            'Content-Type': 'application/json',
+        };
+        
+        logger.info(`Gemini request URL: ${chatURL}`);
+    }
+
+    try {
+
+        if (!isGemini) {
+            finalApiCallParams.model = selectedModel
+            finalApiCallParams.stream = isStreaming
+        }
+
+        logger.info('HEADERS')
+        //logger.info(headers)
+        logger.info(`PAYLOAD`);
+        //logger.info(finalApiCallParams)
+
+        const body = JSON.stringify(finalApiCallParams);
+        //logger.info(body)
+
+        let streamingReportText = finalApiCallParams.stream ? 'streamed' : 'non-streamed'
+        //let modelReportText = finalApiCallParams.model ? `model ${finalApiCallParams.model}` : 'no model specified'
+        // logger.info('finalApiCallParams.stream (inside requestToTCorCC): ' + finalApiCallParams.stream);
+        logger.info(`Sending ${streamingReportText} ${liveAPI.type} request to ${chatURL}..`);
+        //logger.debug(`API KEY: ${key}`)
+
+        let args = {
+            method: 'POST',
+            headers: headers,
+            body: body,
+            timeout: 0,
+        }
+
+        //logger.info(args)
+        const response = await fetch(chatURL, args)
+        //logger.info('FULL RESPONSE')
+        //logger.info('=====================')
+        //logger.info(util.inspect(response, { depth: null }));
+        //logger.info('=====================')
+
+        if (response.status === 200) {
+            logger.info('Status 200: Ok.')
+            return await processResponse(response, isCCSelected, isTest, isStreaming, liveAPI)
+        } else {
+            let responseStatus = response.status
+            logger.error('API error: ' + responseStatus)
+
+            let parsedResponse, unparsedResponse
+            try {
+                parsedResponse = await response.json()
+                logger.warn(parsedResponse); //for debugging
+                return (parsedResponse)
+            }
+            catch {
+                logger.warn('could not parse response, returning it as-is')
+                unparsedResponse = response
+            }
+            let errorResponse = {
+                status: response.status,
+                statusText: response.statusText
+
+            }
+            //these are error message attributes from Tabby
+            //logger.debug(JSONResponse.detail[0].loc) //shows the location of the error causing thing
+            //logger.debug(JSONResponse.detail[0].input) //just shows the value of messages object
+            return errorResponse
+        }
+
+    } catch (error) {
+        logger.error('Error while requesting Text Completion API');
+        const line = error.stack.split('\n').pop().split(':').pop();
+        logger.error(line);
+        logger.error(error);
+        return error
+    }
+}
+
+//MARK: processResponse
+async function processResponse(response, isCCSelected, isTest, isStreaming, liveAPI, lastInContextMessageID = null) {
+    logger.info('Processing response..')
+    let isClaude = liveAPI.claude
+
+    if (!isStreaming) {
+        try {
+            let JSONResponse = await response.json();
+            logger.debug('Response JSON:', JSONResponse);
+            return processNonStreamedResponse(JSONResponse, isCCSelected, isTest, isClaude);
+        }
+        catch (error) {
+            logger.error('Error parsing JSON:', error);
+        }
+    } else {
+        if (response.body) {
+            let chunk = await stream.processStreamedResponse(response, isCCSelected, isTest, isClaude, lastInContextMessageID);
+            //logger.info('chunk: ', chunk)
+            if (chunk) {
+                return chunk
+            }
+        }
+
+    }
+
+    async function processNonStreamedResponse(JSONResponse, isCCSelected, isTest, isClaude) {
+
+        let text
+        let apistatus = 200 //if we got here it's 200.
+        //logger.info('--- API RESPONSE')
+        //logger.info(JSONResponse) 
+        //logger.info(`isCCSelected? ${isCCSelected}`)
+        //logger.info(`isTest? ${isTest}`)
+        
+        // Handle Gemini format
+        if (JSONResponse.candidates && JSONResponse.candidates.length > 0) {
+            text = JSONResponse.candidates[0].content.parts[0].text;
+        } 
+        else if (isCCSelected) {
+            if (isClaude) {
+                text = JSONResponse.completion;
+            }
+            else if (JSONResponse.choices && JSONResponse.choices.length > 0) {
+                text = JSONResponse.choices[0].message?.content
+            }
+            else {
+                logger.info(JSONResponse)
+                return "Unknown API type. Couldn't find response. Check console log."
+            }
+        } else { // text completions have data in 'choices'
+            text = JSONResponse.choices[0].text
+        }
+        //this assumes we got a response from the server that was not 200
+        if (isTest) {
+            let testResults = {
+                status: apistatus,
+                value: text
+            }
+            return testResults
+        }
+        return text
+    }
+
+}
+
+export default {
+    getAIResponse,
+    getAPIDefaults,
+    replaceMacros,
+    testAPI,
+    getModelList,
+    processResponse,
+    addCharDefsToPrompt,
+    setStopStrings,
+    trimIncompleteSentences,
+    getHordeModelList,
+    tryLoadModel
+}

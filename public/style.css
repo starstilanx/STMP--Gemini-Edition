@@ -1,0 +1,1835 @@
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+:root {
+    --baseHue: 220;
+    --baseSat: 0%;
+    --baseLight: 20%;
+
+    --themeBase: hsl(var(--baseHue), calc(var(--baseSat) + 0%), var(--baseLight));
+
+    --themeNeg15: hsl(var(--baseHue), calc(var(--baseSat) + 0%), calc(var(--baseLight) - 15%));
+    --themeNeg10: hsl(var(--baseHue), calc(var(--baseSat) + 0%), calc(var(--baseLight) - 10%));
+    --themeNeg5: hsl(var(--baseHue), calc(var(--baseSat) + 0%), calc(var(--baseLight) - 5%));
+    --themeNeg2: hsl(var(--baseHue), calc(var(--baseSat) + 0%), calc(var(--baseLight) - 2%));
+
+    --themePlus2: hsl(var(--baseHue), calc(var(--baseSat) + 0%), calc(var(--baseLight) + 2%));
+    --themePlus5: hsl(var(--baseHue), calc(var(--baseSat) + 0%), calc(var(--baseLight) + 5%));
+    --themePlus10: hsl(var(--baseHue), calc(var(--baseSat) + 0%), calc(var(--baseLight) + 10%));
+    --themePlus15: hsl(var(--baseHue), calc(var(--baseSat) + 0%), calc(var(--baseLight) + 15%));
+
+    --themePlus35: hsl(var(--baseHue), calc(var(--baseSat) + 0%), calc(var(--baseLight) + 35%));
+    /*MD italics and UI subtexts*/
+    --themePlus45: hsl(var(--baseHue), calc(var(--baseSat) + 0%), calc(var(--baseLight) + 45%));
+    /*core UI/chat font*/
+
+    --themeAccent: hsl(var(--baseHue), calc(var(--baseSat) + 25%), calc(var(--baseLight) + 25%));
+    /*quotesColor + activePastChat*/
+    --themeAccentBold: hsl(var(--baseHue), calc(var(--baseSat) + 45%), calc(var(--baseLight) + 45%));
+    /*activePastChat on Hover*/
+}
+
+body,
+html {
+    background-color: var(--themeNeg10);
+    width: 100vw;
+    height: 100vh;
+    color: var(--themePlus45);
+    margin: 0;
+    padding: 0;
+    font-family: "Noto Sans", "Noto Color Emoji", sans-serif;
+    font-size: 15px;
+    font-weight: 500;
+    overflow: hidden;
+}
+
+/* MARK: jQuery UI
+*/
+.ui-widget,
+.ui-dialog,
+.ui-widget-content,
+.ui-dialog-titlebar,
+.ui-dialog-title,
+.ui-widget.ui-widget-content {
+    background: var(--themeBase);
+    border: 0;
+    border-radius: 10px;
+    color: var(--themePlus45);
+    font-family: "Noto Sans", "Noto Color Emoji", sans-serif;
+    font-weight: 500;
+}
+
+.ui-widget textarea {
+    font-family: "Noto Sans", "Noto Color Emoji", sans-serif;
+    font-weight: 500;
+}
+
+.ui-dialog .ui-dialog-title {
+    text-align: center;
+    width: 100%;
+}
+
+.ui-dialog .ui-dialog-titlebar {
+    padding-inline-start: 5px;
+    border-radius: 0;
+}
+
+.ui-button,
+.ui-dialog input {
+    border-radius: 5px;
+    border: 0;
+    background-color: var(--themePlus5);
+    color: var(--themePlus45);
+    outline: none;
+}
+
+.ui-widget-overlay {
+    background: rgba(0, 0, 0, 1);
+    opacity: 0.5;
+    backdrop-filter: blur(20px);
+}
+
+.ui-dialog {
+    box-shadow: 0 0 5px rgba(0, 0, 0, 0.3);
+}
+
+.ui-dialog #errorMessage {
+    min-height: 20px;
+    margin: 10px 0 0;
+    color: #cd334d;
+}
+
+.ui-dialog-titlebar-close {
+    display: none;
+}
+
+.JQUIPopupInput {
+    width: 100%;
+    background-color: var(--themePlus5);
+    padding: 3px 7px;
+    resize: none;
+    border: 1px solid var(--themePlus10);
+    border-radius: 10px;
+}
+
+/*MARK:.modal
+*/
+.modal {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: white;
+    padding: 20px;
+    border: 1px solid black;
+    z-index: 1000;
+    box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.modal form {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.modal input,
+.modal button {
+    margin: 10px 0;
+    padding: 5px;
+    width: 100%;
+    max-width: 200px;
+}
+
+.modal p {
+    margin: 0 0 10px;
+}
+
+/*MARK: #containers
+*/
+#appWrap {
+    display: flex;
+    /* justify-content: center; */
+    align-items: center;
+    width: 100vw;
+    height: 100vh;
+    flex-direction: row;
+}
+
+#bodyWrap {
+    width: 70vw;
+    height: 100vh;
+}
+
+#contentWrap {
+    height: 100svh;
+    width: 100%;
+    transition: width 250ms ease;
+}
+
+.widthFull {
+    width: 100%;
+}
+
+.widthNarrow {
+    width: 50vw !important;
+}
+
+#chatWrap {
+    position: relative;
+    max-height: 100%;
+    overflow-y: auto;
+}
+
+#LLMChatWrapper,
+#OOCChatWrapper {
+    height: 100%;
+    overflow: hidden;
+    position: relative;
+    background: var(--themePlus5);
+    border-radius: 10px;
+    padding: 5px;
+}
+
+#OOCChatWrapper img,
+#LLMChatWrapper img {
+    max-height: 80%;
+    max-width: 80%;
+}
+
+#userChat,
+#AIChat {
+    flex: 1;
+    overflow-y: auto;
+    height: 100%;
+    max-height: 100%;
+    border-radius: 10px;
+    /* border: 1px solid var(--themePlus10); */
+}
+
+#userChat>div,
+#AIChat>div {
+    background-color: var(--themePlus5);
+}
+
+
+hr {
+    background-image: linear-gradient(90deg, rgba(128, 128, 128, 100), rgba(128, 128, 128, 100));
+    margin: 5px 0;
+    height: 1px;
+    min-height: 1px;
+    border: 0;
+    opacity: 0.2;
+}
+
+.spanner15vw {
+    width: 15vw;
+}
+
+#rightWrap {
+    width: 70%;
+}
+
+#universalControls {
+    position: relative;
+    width: 100%;
+    height: 3em;
+}
+
+#universalControls>div {
+    display: flex;
+    gap: 1em;
+}
+
+#inputBlock,
+#AIInputBlock {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    /* background-color: var(--themeBase); */
+    border-radius: 0 0 10px 10px;
+}
+
+.inputAndIconsWrapper {
+    border-radius: 10px;
+    margin: 5px;
+    background-color: var(--themePlus10);
+    width: 100%;
+}
+
+#controlPanel,
+#userListsWrap {
+    width: 15vw;
+    background-color: var(--themeBase);
+    height: 100vh;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+#userList,
+#AIChatUserList {
+    width: 50%;
+    overflow-y: auto;
+    max-height: 100%;
+    overflow-x: hidden;
+    line-break: anywhere;
+    margin-top: 5px;
+}
+
+#userList {
+    border-right: 1px dashed #444;
+}
+
+
+.width25vw {
+    width: 25vw !important;
+}
+
+#controlPanel h4,
+#userListsWrap h4 {
+    margin: 0;
+    font-size: 1.25em;
+    text-align: center;
+}
+
+#controlPanel span,
+#pastChatsBlock span,
+small {
+    font-size: 0.8em;
+    color: var(--themePlus35);
+}
+
+#pastChatsBlock .activeChat small,
+#pastChatsBlock .activeChat span {
+    color: var(--themePlus2);
+}
+
+#AIConfigBlock,
+#pastChatsBlock {
+    flex-shrink: 0;
+}
+
+#insertionsBlock:not(.minimized) {
+    flex-grow: 1;
+    min-height: 0;
+}
+
+#insertionsBlock.minimized {
+    flex-grow: 0;
+    min-height: 0;
+}
+
+/*MARK: scrollbars
+*/
+
+/* basic styles for main chat displays*/
+
+::-webkit-scrollbar {
+    width: 12px;
+    scrollbar-gutter: stable;
+    transition: all 250ms ease-in-out;
+}
+
+
+::-webkit-scrollbar-track {
+    background-color: var(--themeBase);
+    border: 3px solid var(--themePlus5);
+    margin: 5px 0;
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+    background-color: var(--themeNeg10);
+    border-radius: 10px;
+    background-clip: content-box;
+    border: 3px solid transparent;
+    min-height: 40px;
+}
+
+
+/*textarea scrollbars have no track, and only show up when the textarea is hovered over.*/
+
+textarea::-webkit-scrollbar-thumb,
+#controlPanel textarea::-webkit-scrollbar-thumb {
+    background-color: var(--themePlus5);
+    border: 3px solid transparent;
+    border-radius: 10px;
+    background-clip: content-box;
+}
+
+.inputAndIconsWrapper textarea::-webkit-scrollbar-thumb,
+.inputAndIconsWrapper textarea::-webkit-scrollbar-thumb {
+    background-color: var(--themePlus10)
+}
+
+
+#pastChatsList::-webkit-scrollbar-thumb {
+    background-color: inherit;
+    border-radius: 10px;
+    border: 1px solid transparent;
+}
+
+textarea::-webkit-scrollbar-track,
+#AIMessageInput::-webkit-scrollbar-track,
+#messageInput::-webkit-scrollbar-track {
+    display: none
+}
+
+/* PastChatsList scrollbar */
+#pastChatsList::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+}
+
+#pastChatsList::-webkit-scrollbar-track {
+    display: none;
+}
+
+/*MARK: inputs/buttons
+*/
+input,
+textarea,
+button,
+select,
+.nonButtonButton {
+    border-radius: 5px;
+    border: 0;
+    background-color: var(--themePlus5);
+    color: var(--themePlus45);
+    outline: none;
+    z-index: 2;
+    transition: all 250ms ease-in-out;
+    padding: 3px 5px;
+    font-family: "Noto Sans", "Noto Color Emoji", sans-serif;
+    font-weight: 500;
+}
+
+.chatHeader select,
+.chatHeader input {
+    transition: all 250ms ease-in-out;
+    background-color: var(--themePlus10);
+}
+
+
+
+textarea {
+    transition: all 250ms ease-in-out;
+}
+
+.insertionPromptBlock {
+    flex-grow: 1;
+    min-height: 0;
+    transition: all 250ms ease-in-out;
+}
+
+/*Dynamic focus-based sizing for Insertion Blocks*/
+/*Shrinks unfocused insertion blocks when one is focused*/
+:has(+ .insertionPromptBlock + .insertionPromptBlock + .insertionPromptBlock + .insertionPromptBlock textarea:focus-within), /*block 4 spaces before focused block*/
+:has(+ .insertionPromptBlock + .insertionPromptBlock + .insertionPromptBlock textarea:focus-within), /*block 3 spaces before focused block*/
+:has(+ .insertionPromptBlock + .insertionPromptBlock textarea:focus-within), /*block 2 spaces before focused block*/
+:has(+ .insertionPromptBlock textarea:focus-within), /*block 1 space before focused block*/
+.insertionPromptBlock:has(textarea:focus-within) ~ .insertionPromptBlock /*for all blocks after focused block*/
+{
+    flex-grow: 0;
+    opacity: 0.6;
+}
+
+:has(+ .insertionPromptBlock + .insertionPromptBlock + .insertionPromptBlock + .insertionPromptBlock textarea:focus-within) textarea, /*block 4 spaces before focused block*/
+:has(+ .insertionPromptBlock + .insertionPromptBlock + .insertionPromptBlock textarea:focus-within) textarea, /*block 3 spaces before focused block*/
+:has(+ .insertionPromptBlock + .insertionPromptBlock textarea:focus-within) textarea, /*block 2 spaces before focused block*/
+:has(+ .insertionPromptBlock textarea:focus-within) textarea, /*block 1 space before focused block*/
+.insertionPromptBlock:has(textarea:focus-within) ~ .insertionPromptBlock textarea /*for all blocks after focused block*/
+{
+    height: 2em;
+}
+
+#controlPanel textarea {
+    flex-grow: 1;
+    min-height: 0;
+    resize: none;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+
+
+#controlPanel button.greyscale {
+    background-color: var(--themeBase);
+}
+
+#promptConfigTextFields {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+}
+
+button,
+select,
+.nonButtonButton,
+.messageButton {
+    cursor: pointer;
+}
+
+.messageButton {
+    font-size: 1.3em;
+    padding-left: 5px;
+}
+
+#AIChatHostControls input[type='text'],
+#userChatHostControls input[type='text'] {
+    width: 2.5em;
+    padding-left: 5px;
+    background-color: var(--themePlus10);
+}
+
+.hostControls {
+    display: none;
+    transition: all 250ms ease-in-out;
+}
+
+.positionAbsolute {
+    position: absolute;
+}
+
+.positionRelative {
+    position: relative;
+}
+
+.custom-select {
+    display: flex;
+    justify-content: right;
+    position: relative;
+    z-index: 3;
+    width: fit-content;
+    max-width: 14vw;
+}
+
+.chatTrash {
+    top: 0;
+    right: 0;
+    background: transparent;
+}
+
+input[type="checkbox"]::before {
+    content: "";
+    width: 1em;
+    height: 1em;
+    transform: scale(0);
+    transition: 120ms transform ease-in-out;
+    box-shadow: inset 1em 1em var(--themePlus45);
+    transform-origin: bottom left;
+    clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+}
+
+input[type="checkbox"]:checked::before {
+    transform: scale(1);
+}
+
+.checkbox_label {
+    display: flex;
+    flex-direction: row;
+    column-gap: 5px;
+    align-items: baseline;
+}
+
+button,
+input,
+.nonButtonButton {
+    padding: 3px;
+    width: fit-content;
+}
+
+#AIChatInputButtons,
+#UserChatInputButtons {
+    top: 0;
+    background-color: var(--themePlus10);
+}
+
+#AIChatHostControls {
+    /* background-color: var(--themeBase); */
+    z-index: 9;
+}
+
+#UserChatInputButtons {
+    border-radius: 0 10px 10px 0;
+    /* background-color: var(--themeNeg10); */
+}
+
+#AIChatInputButtons button {
+    padding: 0;
+}
+
+input::placeholder,
+input::-webkit-input-placeholder,
+input::-moz-placeholder,
+input::-ms-input-placeholder {
+    color: var(--themeNeg15);
+    align-self: center;
+}
+
+
+textarea::placeholder,
+textarea::-webkit-input-placeholder,
+textarea::-moz-placeholder,
+textarea::-ms-input-placeholder {
+    color: var(--themeNeg15);
+    align-self: center;
+}
+
+.disconnected::placeholder {
+    color: red;
+}
+
+#controlPanelToggle {
+    left: 5px;
+}
+
+input:disabled,
+select:disabled,
+input[readonly]:not([type="checkbox"]),
+button:disabled,
+.disabled {
+    cursor: not-allowed;
+}
+
+/*MARK: dragdrop overlays
+*/
+#AIChatDropOverlay,
+#UploadSuccessOverlay {
+    position: absolute;
+    top: 3em;
+    left: 1.5em;
+    width: 87%;
+    height: 80%;
+    background-color: rgba(85, 108, 214, .28);
+    color: var(--themePlus45);
+    border: 5px dashed #243166;
+    border-radius: 10px;
+    font-size: 1.5em;
+    font-weight: bold;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    pointer-events: none;
+    backdrop-filter: blur(8px);
+    z-index: 10;
+    padding: 30px;
+}
+
+#UploadSuccessOverlay {
+    background-color: rgba(87, 202, 83, 0.28);
+    color: var(--themePlus45);
+    border: 5px dashed rgb(61, 165, 58);
+}
+
+#LLMChatWrapper.dragover #AIChatDropOverlay,
+#LLMChatWrapper.uploadSuccess #UploadSuccessOverlay {
+    opacity: 1 !important;
+}
+
+input[type='checkbox'] {
+    appearance: none;
+    position: relative;
+    width: 1.5em;
+    height: 1.5em;
+    border-radius: 3px;
+    background-color: var(--themePlus5);
+    box-shadow: inset 0 0 2px 0 rgba(0, 0, 0, 0.5);
+    cursor: pointer;
+    transform: translateY(-0.075em);
+    flex-shrink: 0;
+    place-content: center;
+    /* filter: brightness(1.2); */
+    display: grid;
+}
+
+.messageTime {
+    font-size: 0.8em;
+    margin-left: 5px;
+    color: var(--themePlus35);
+    font-weight: 400;
+}
+
+code {
+    font-family: monospace;
+    background: var(--themeNeg10);
+    color: var(--themePlus35);
+    border-radius: 5px;
+    padding: 2px 4px;
+    text-wrap: wrap;
+}
+
+pre {
+    padding: 0 5px;
+    background: var(--themeNeg10);
+    color: var(--themePlus35);
+    margin: 5px;
+    border-radius: 5px;
+    width: fit-content;
+}
+
+.invisible-quotation::before,
+.invisible-quotation::after {
+    display: none;
+}
+
+
+/*MARK:chatMessages
+*/
+
+.contextLine {
+    border-top: 3px dotted var(--themeAccentBold);
+}
+
+
+
+#userChat>div,
+#AIChat>div {
+    padding: 5px;
+    margin: 15px 0;
+    overflow-wrap: break-word;
+    border-radius: 10px;
+    width: 100%;
+    height: fit-content;
+}
+
+.messageControls {
+    opacity: 0;
+    right: 5px;
+    gap: 10px;
+    position: relative;
+}
+
+.messageHeader:focus .messageControls,
+.messageHeader:active .messageControls {
+    opacity: 0.7;
+}
+
+#mesEditPopup {
+    display: flex;
+    flex-flow: column;
+    padding: 5px;
+}
+
+#mesEditText,
+#modalUsernameInput {
+    width: 100%;
+    background-color: var(--themePlus5);
+    padding: 3px 7px;
+    flex: 1;
+    resize: none;
+}
+
+/* .ui-dialog #modalUsernameInput,
+#usernameInput,
+#AIUsernameInput {
+    transition: background-color 0.3s ease;
+} */
+
+#userChat div p,
+#AIChat div p {
+    margin: 0;
+    padding-bottom: 10px;
+}
+
+#userChat div p em,
+#AIChat div p em {
+    color: var(--themePlus35);
+}
+
+#userChat div p q,
+#AIChat div p q {
+    color: var(--themeAccentBold);
+}
+
+ /* existing styles... */
+
+/* Inline continue button visibility: host-only hover */
+.inlineContinue {
+    opacity: 0;
+    transition: opacity 150ms ease;
+    margin-left: 0.25em;
+    font-size: 1em;
+}
+
+/* Show on hover of the message container (AI messages only) */
+div[data-entitytype="AI"]:hover .inlineContinue {
+    opacity: 1;
+}
+
+/* While streaming, hide any inline continue to avoid accidental clicks */
+body.currentlyStreaming .inlineContinue {
+    pointer-events: none;
+    opacity: 0.2;
+}
+
+/*MARK:chat Inputs
+*/
+#AIMessageInput,
+#messageInput {
+    height: 2.2em;
+    min-height: 2.2em;
+    flex-grow: 1;
+    background-color: transparent;
+    padding: 5px 10px;
+    font-size: 1em;
+    max-height: 50vh;
+    overflow-y: auto;
+    line-height: 1.4em;
+    resize: none;
+}
+
+#userRole {
+    font-size: 0.8em;
+    color: var(--themePlus10);
+}
+
+#roleKeyInput {
+    width: 32em;
+    height: 2em;
+}
+
+
+
+/* .chatAndTrashWrap {
+    height: 100%;
+    max-height: 100%;
+    overflow-y: auto;
+    padding-top: 5px;
+    background-color: var(--themePlus10);
+    border-radius: 10px 10px 0 0;
+} */
+
+/* MARK:userLists
+*/
+
+
+#userList ul,
+#AIChatUserList ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+#userList ul li,
+#AIChatUserList ul li {
+    padding: 3px;
+    font-size: 0.8em;
+}
+
+/*MARK: pastChats
+ */
+
+#pastChatsBlock {
+    max-height: 40vh;
+    flex-shrink: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+}
+
+#pastChatsWrap {
+    position: relative;
+    overflow-y: hidden;
+}
+
+#controlPanelContents {
+    overflow-y: auto;
+}
+
+#pastChatsList {
+    overflow-y: scroll;
+    overflow-x: hidden;
+    border-radius: 5px;
+    padding: 0 5px 0 10px;
+    height: 100%;
+}
+
+.pastChatItem {
+    cursor: pointer;
+    padding: 3px 0 3px 7px;
+    border-radius: 5px;
+    background-color: var(--themePlus5);
+    width: 100%;
+    height: fit-content;
+}
+
+.pastChatItem.activeChat {
+    background-color: var(--themeAccent);
+}
+
+#pastChatsList {
+    transition: all 0.5s;
+    background-clip: text;
+}
+
+
+
+/*MARK: STMP Tailwind
+*/
+
+
+.hidden {
+    display: none !important;
+}
+
+.scrollY {
+    overflow-y: auto;
+}
+
+.hoverglow {
+    transition: all 250ms ease-in-out;
+    outline: 1px solid #666;
+    filter: saturate(0.5);
+}
+
+.padding5 {
+    padding: 5px;
+}
+
+.paddingLR5 {
+    padding: 0 5px;
+}
+
+.Hcentered {
+    justify-content: center;
+}
+
+.Vcentered {
+    align-items: center;
+}
+
+.alignContentStart {
+    align-content: start;
+}
+
+.alignContentCenter {
+    align-content: center;
+}
+
+.alignSelfCenter {
+    align-self: center;
+}
+
+.alignSelfFlexEnd {
+    align-self: flex-end;
+}
+
+.alignItemsCenter {
+    align-items: center;
+}
+
+.alignItemsEnd {
+    align-items: end;
+}
+
+.marginTop5 {
+    margin-top: 5px;
+}
+
+.marginBot5 {
+    margin-bottom: 5px;
+}
+
+.marginLeft5 {
+    margin-left: 5px;
+}
+
+.marginRight5 {
+    margin-right: 5px;
+}
+
+.margin5 {
+    margin: 5px;
+}
+
+.margin0 {
+    margin: 0 !important;
+}
+
+.marginBot0 {
+    margin-bottom: 0 !important;
+}
+
+.marginTop0 {
+    margin-top: 0 !important;
+}
+
+.paddingTop0 {
+    padding-top: 0 !important;
+}
+
+.paddingBot0 {
+    padding-bottom: 0 !important;
+}
+
+.flexbox {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+}
+
+.gap10 {
+    gap: 10px;
+}
+
+.noGap {
+    gap: 0;
+}
+
+.noWrap {
+    flex-wrap: nowrap;
+}
+
+.noTextWrap {
+    text-wrap: nowrap;
+}
+
+.greenHighlight {
+    background-color: #496951 !important;
+}
+
+.borderRad5 {
+    border-radius: 5px;
+}
+
+.borderRad10 {
+    border-radius: 10px;
+}
+
+.flexFlowCol {
+    flex-flow: column;
+}
+
+.flex1 {
+    flex: 1;
+}
+
+.flex1p5 {
+    flex: 1.5;
+}
+
+.flex2 {
+    flex: 2;
+}
+
+.widthMinContent {
+    width: min-content;
+}
+
+.widthFitContent {
+    width: fit-content;
+}
+
+.width50p {
+    width: 50%;
+}
+
+.width100p {
+    width: 100%;
+}
+
+.maxWidth100px {
+    max-width: 100px;
+}
+
+.maxWidth50px {
+    max-width: 50px;
+}
+
+.width100px {
+    width: 100px;
+}
+
+.width50px {
+    width: 50px;
+}
+
+.width3p5em {
+    width: 3.5em;
+}
+
+.fontSize1p5em {
+    font-size: 1.5em;
+}
+
+.square1p5em {
+    height: 1.5em;
+    width: 1.5em;
+    padding: 0;
+}
+
+.fontSize1p25em {
+    font-size: 1.25em;
+}
+
+.square1p25em {
+    height: 1.25em;
+    width: 1.25em;
+    padding: 0;
+}
+
+.greyscale {
+    filter: saturate(0);
+}
+
+.greyscale.dimmed {
+    filter: saturate(0) brightness(0.5);
+}
+
+.opacity30:not(:hover) {
+    filter: opacity(0.3);
+}
+
+.mutedColor {
+    filter: saturate(0.3);
+}
+
+.greyText {
+    color: var(--themePlus35);
+}
+
+.bgTransparent {
+    background-color: transparent;
+}
+
+.opacityZero {
+    opacity: 0;
+    transition: opacity 250ms ease;
+}
+
+.opacityHalf {
+    opacity: 0.5;
+}
+
+.transition0 {
+    transition: 0ms;
+}
+
+.transition125 {
+    transition: all 125ms ease-in-out;
+}
+
+.transition250 {
+    transition: all 250ms ease-in-out;
+}
+
+.transition500 {
+    transition: all 0.5s ease-in-out;
+}
+
+.justifySpaceBetween {
+    justify-content: space-between;
+}
+
+.justifySpaceAround {
+    justify-content: space-around;
+}
+
+.justifyContentCenter {
+    justify-content: center;
+}
+
+.justifyContentEnd {
+    justify-content: end;
+}
+
+body:not(.noShadow) .textshadow {
+    text-shadow: 0 0 5px rgba(0, 0, 0, 0.5);
+}
+
+.flipHorizontal {
+    display: inline-block;
+    transform: scaleX(-1);
+}
+
+.flipVertical {
+    display: inline-block;
+    transform: scaleY(-1);
+}
+
+.flipBoth {
+    display: inline-block;
+    transform: scale(-1, -1);
+}
+
+.mirror {
+    display: inline-block;
+    transform: rotateX(180deg);
+}
+
+.chatHideDivWrapper {
+    max-height: 100%;
+    overflow-y: auto;
+}
+
+.height100p {
+    height: 100%;
+}
+
+.maxHeight100p {
+    max-height: 100%;
+}
+
+.heightFitContent {
+    height: fit-content;
+}
+
+.overflowYHidden {
+    overflow-y: hidden;
+}
+
+.overflowXHidden {
+    overflow-x: hidden;
+}
+
+.usernameDecorator {
+    filter: saturate(0.5);
+    bottom: 0.1em;
+    position: relative;
+}
+
+.simpleRoundGrey4Border {
+    border: 1px solid #444;
+    border-radius: 10px;
+}
+
+/*MARK: hostToast
+*/
+#hostToast {
+    display: none;
+    position: fixed;
+    top: 4.2em;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(216, 196, 76, 0.5);
+    backdrop-filter: blur(4px);
+    color: var(--themeNeg10);
+    padding: 15px;
+    border-radius: 10px;
+    font-size: 1.4em;
+    font-weight: bold;
+    z-index: 10000;
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+    max-width: 65vw;
+    border: 2px solid rgba(51, 51, 51, 0.4);
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+}
+
+#hostToast p {
+    margin: 0;
+    padding: 5px;
+}
+
+
+
+.modal #errorMessage {
+    min-height: 20px;
+}
+
+.chatOverlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background-color: rgba(0, 0, 0, 0);
+    color: white;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2em;
+    font-weight: bold;
+    pointer-events: all;
+    transition: background-color 1s linear;
+    z-index: 10;
+}
+
+.clearChatCancelButton {
+    margin-top: 10px;
+    padding: 6px 12px;
+    background: red;
+    border: none;
+    color: white;
+    font-weight: bold;
+    cursor: pointer;
+    border-radius: 6px;
+    transition: background-color 0.3s ease;
+}
+
+.unavailable-overlay {
+    position: relative;
+    display: flex;
+    align-items: center;
+    width: max-content;
+}
+
+.unavailable-overlay::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 10;
+    border-radius: 10px;
+    border: 1px solid black;
+    background-image: repeating-linear-gradient(45deg, black, black 3px, transparent 3px, transparent 6px);
+    pointer-events: auto;
+    cursor: not-allowed;
+    opacity: 0.5;
+}
+
+.toggleButton {
+    /* Base (off) state: square & transparent */
+    background-color: transparent;
+    border-radius: 6px; /* small square-ish corners */
+    /* Transition both radius & color simultaneously */
+    transition: border-radius 220ms ease, background-color 220ms ease, filter 220ms ease;
+}
+
+.transparent1pxBorder {
+    border: 1px solid transparent;
+}
+.nonButtonButton.toggleButtonOn {
+    border-color: #12591d;
+    filter: unset;
+}
+
+
+.toggleButton.toggleButtonOn {
+    background-color: #12591d;
+    border-radius: 50%;
+    filter: unset;
+}
+/* Explicit override to avoid inherited transition: all jitter */
+.hostControls.toggleButton { transition: border-radius 220ms ease, background-color 220ms ease, filter 220ms ease; }
+
+/* Accessibility focus ring */
+.toggleButton:focus-visible { outline: 2px solid #2fa04c; outline-offset: 3px; }
+
+/* Character slot action buttons fade-in support */
+.charSlotActionButton {
+    opacity: 1;
+    transition: opacity 180ms ease-in;
+}
+.charSlotActionButton.isHiddenForNone {
+    visibility: hidden; /* retains layout */
+    opacity: 0;
+    pointer-events: none;
+}
+
+body.disableGuestInput #inputBlock *,
+body.disableGuestInput #AIInputBlock * {
+    color: #651b1b !important;
+    cursor: not-allowed;
+    background-color: #5b1a1a !important;
+}
+
+/*MARK:@hover styles
+*/
+@media (any-hover: hover) {
+
+    select:hover:not(:disabled),
+    input[type='checkbox']:hover,
+    .pastChatItem:not(.activeChat):hover,
+    .bgBrightUp:hover,
+    .bgBrightUp:focus,
+    input:hover,
+    input:focus {
+        filter: brightness(1.2);
+    }
+
+    textarea:hover {
+        background-color: var(--themePlus10);
+    }
+
+    .inputAndIconsWrapper:hover,
+    .inputAndIconsWrapper:focus {
+        background-color: var(--themePlus15)
+    }
+
+    .textBrightUp:hover {
+        color: white;
+    }
+
+    #userChat>div:hover,
+    #AIChat>div:hover {
+        background-color: var(--themeBasePlus2);
+    }
+
+    #AIChat>div:hover .messageControls,
+    #userChat>div:hover .messageControls {
+        opacity: 0.7;
+    }
+
+    .pastChatItem.activeChat:hover {
+        background-color: var(--themeAccentBold)
+    }
+
+    #pastChatsList:hover {
+        background-color: var(--themeNeg10)
+    }
+
+    .greyscale:not(:disabled):hover,
+    .mutedColor:not(:disabled):hover {
+        filter: saturate(0.7);
+    }
+
+    .opacityHalf:hover {
+        opacity: 1;
+    }
+
+    .ui-button:hover,
+    .ui-button:focus {
+        border: 0;
+    }
+
+    .clearChatCancelButton:hover {
+        background: darkred;
+    }
+
+    .chatHeader select:hover,
+    .chatHeader input:hover {
+        filter: brightness(1.5);
+    }
+}
+
+/*MARK: shake animation
+*/
+@keyframes intenseShake {
+    0% {
+        transform: translate(0, 0) rotate(0deg);
+    }
+
+    20% {
+        transform: translate(var(--shake-intensity), calc(var(--shake-intensity) * -1)) rotate(-0deg);
+    }
+
+    40% {
+        transform: translate(calc(var(--shake-intensity) * -1), var(--shake-intensity)) rotate(0deg);
+    }
+
+    60% {
+        transform: translate(var(--shake-intensity), var(--shake-intensity)) rotate(-0deg);
+    }
+
+    80% {
+        transform: translate(calc(var(--shake-intensity) * -1), calc(var(--shake-intensity) * -1)) rotate(0deg);
+    }
+
+    100% {
+        transform: translate(0, 0) rotate(0deg);
+    }
+}
+
+.nervousShake {
+    display: inline-block;
+    animation: intenseShake .1s infinite;
+    will-change: transform;
+    --shake-intensity: 1px;
+}
+
+/*MARK: @mobile
+*/
+@media (max-width: 1000px) and (orientation: portrait) {
+
+    #controlPanel,
+    #userListsWrap,
+    #bodyWrap,
+    #universalControls,
+    #chatWrap,
+    #contentWrap,
+    #LLMChatWrapper,
+    #OOCChatWrapper,
+    #AIChat,
+    #appWrap,
+    body,
+    html,
+    #userChat {
+        margin: unset;
+        padding: unset;
+        width: unset;
+        height: unset;
+        min-width: unset;
+        min-height: unset;
+        max-width: unset;
+        max-height: unset;
+    }
+
+    body,
+    #bodyWrap,
+    #chatWrap,
+    #appWrap {
+        flex-direction: column;
+
+    }
+
+    body,
+    #bodyWrap,
+    #appWrap {
+        width: 100vw;
+    }
+
+    #chatWrap {
+        width: 97%;
+    }
+
+    body {
+        padding-left: 5px;
+        padding-right: 5px;
+        margin: 0 auto;
+    }
+
+
+
+    #controlPanel,
+    #userListsWrap {
+        margin: unset;
+        padding: unset;
+        min-width: unset;
+        min-height: unset;
+        width: 99vw;
+        max-width: 99vw;
+        height: calc(100dvh - 3em);
+        max-height: calc(100dvh - 3em);
+        padding-left: 10px;
+        padding-right: 10px;
+        top: 3em;
+        position: fixed;
+        z-index: 11;
+        padding-bottom: 10px;
+    }
+
+    #controlPanelContents {
+        margin: unset;
+        padding: unset;
+        width: unset;
+        height: unset;
+        min-width: unset;
+        max-width: unset;
+        min-height: unset;
+        max-height: unset;
+        width: 99%;
+        max-width: 99%;
+        height: calc(100dvh - 3em);
+    }
+
+
+
+    #universalControls {
+        height: 3em;
+        width: 97vw;
+    }
+
+
+    body,
+    #bodyWrap,
+    #contentWrap,
+    #appWrap {
+        margin: 0;
+    }
+
+    #LLMChatWrapper,
+    #OOCChatWrapper {
+        width: 100%;
+        padding: 5px;
+    }
+
+    .chatHeader {
+        padding-bottom: 10px;
+    }
+
+    .chatHideDivWrapper {
+        flex-flow: column;
+    }
+
+    .custom-select {
+        max-width: unset;
+    }
+
+    button {
+        font-size: 1em;
+    }
+
+    input[type='checkbox'] {
+        height: 2em;
+        width: 2em;
+    }
+
+    button:not(#controlPanel button, .ui-button) {
+        font-size: 1.5em;
+    }
+
+    #userList,
+    #AIChatUserList {
+        width: unset;
+        flex: 1;
+    }
+
+    #userListsWrap>div {
+        flex: 1;
+    }
+
+    .messageControls {
+        opacity: 0.1;
+    }
+
+    body,
+    #appWrap,
+    #bodyWrap,
+    #contentWrap {
+        height: 99dvh;
+    }
+
+    #cardList {
+        width: 100px;
+    }
+
+    .chatHeader,
+    .AIChatHeaderCenterCluster {
+        flex-wrap: nowrap;
+    }
+}
+
+/*MARK:@mobile landscape
+*/
+@media (max-width: 1000px) and (orientation: landscape) {
+
+    #controlPanelContents,
+    #chatWrap,
+    #userListsWrap {
+        flex-flow: row;
+    }
+
+    #LLMChatWrapper,
+    #OOCChatWrapper {
+        height: 100% !important;
+    }
+
+    #controlPanelContents>div,
+    #userListsWrap>div,
+    #lists>div {
+        flex: 1;
+    }
+
+    #userListsWrap>div {
+        height: 98%;
+        max-height: 100%;
+        min-height: 0;
+        overflow: hidden;
+    }
+
+    #userListsWrap hr {
+        display: none;
+    }
+
+    #pastChatsBlock {
+        max-height: 100%;
+        overflow-y: auto;
+    }
+
+    #controlPanelContents> :first-child {
+        flex: 0.5
+    }
+
+    #controlPanelContents {
+        gap: 5px;
+    }
+
+    .isControlPanelToggle i {
+        display: none;
+    }
+
+    #crowdControl {
+        margin-top: 5px;
+    }
+
+    body,
+    #appWrap,
+    #bodyWrap,
+    #contentWrap {
+        height: calc(100dvh - 25px);
+    }
+
+    body {
+        padding-right: calc(env(safe-area-inset-right)/3);
+        padding-left: env(safe-area-inset-left);
+        width: calc(100dvw);
+        /* border: 1px solid red; */
+        justify-self: center;
+    }
+
+
+    #appWrap,
+    #bodyWrap,
+    #chatwrap {
+        width: 100%;
+        /* calc(100dvw - env(safe-area-inset-left) - env(safe-area-inset-right)); */
+    }
+
+    #controlPanel,
+    #userListsWrap {
+        top: 3em;
+        position: fixed;
+        z-index: 11;
+        height: calc(100dvh - 3em - env(safe-area-inset-bottom));
+        width: calc(100dvw - env(safe-area-inset-left) - calc(env(safe-area-inset-right))/3);
+    }
+
+    #cardList {
+        width: 100px;
+    }
+
+    .chatHeader,
+    .AIChatHeaderCenterCluster {
+        flex-wrap: nowrap;
+    }
+
+
+
+}
+
+/*MARK: @mobile PWA
+*/
+@media (max-width: 1000px) and (display-mode: standalone) {
+
+    body {
+        margin: unset;
+        padding: unset;
+        width: unset;
+        height: unset;
+        min-width: unset;
+        max-width: unset;
+        min-height: unset;
+        max-height: unset;
+
+        padding-top: max(env(safe-area-inset-top), 0px);
+        padding-bottom: max(env(safe-area-inset-bottom), 0px);
+        padding-right: max(env(safe-area-inset-right), 0px);
+        padding-left: max(env(safe-area-inset-right), 0px);
+        margin: 0 auto;
+
+    }
+
+    #appWrap,
+    #bodyWrap,
+    body,
+    html {
+        overflow: hidden;
+        overscroll-behavior: none;
+        touch-action: none;
+
+    }
+
+
+    /* Remove redundant overrides that apply fixed widths/heights elsewhere */
+    #controlPanel,
+    #userListsWrap,
+    #bodyWrap,
+    #universalControls,
+    #chatWrap,
+    #contentWrap,
+    #LLMChatWrapper,
+    #OOCChatWrapper,
+    #AIChat,
+    #userChat {
+        margin: unset;
+        padding: unset;
+
+        width: unset;
+        height: unset;
+
+        min-width: unset;
+        min-height: unset;
+
+        max-width: unset;
+        max-height: unset;
+    }
+
+    #LLMChatWrapper,
+    #chatWrap,
+    #OOCChatWrapper {
+        width: 100%;
+        height: 100%;
+        ;
+    }
+
+    #bodyWrap,
+    #contentWrap,
+    #AIChat,
+    #userChat {
+        width: 100%;
+        height: 100%
+    }
+
+    #controlPanel,
+    #userListsWrap {
+        width: calc(100% - max(env(safe-area-inset-right), 0px) - max(env(safe-area-inset-right), 0px));
+        height: calc(100% - 3em - max(env(safe-area-inset-top), 0px) - max(env(safe-area-inset-bottom), 0px));
+        top: 3em;
+    }
+
+    #appWrap {
+        margin: unset;
+        padding: unset;
+        width: unset;
+        height: unset;
+        min-width: unset;
+        max-width: unset;
+        min-height: unset;
+        max-height: unset;
+        width: 100%;
+        height: calc(100vh - 36px);
+        height: calc(100dvh - 36px);
+        padding-bottom: 0;
+
+    }
+
+    #chatWrap {
+
+        height: 100%;
+        align-items: start;
+    }
+
+    #universalControls {
+        width: 100%;
+        max-width: 100%;
+        height: 3em;
+    }
+
+    #contentWrap {
+        width: 100%;
+    }
+
+    #bodyWrap {
+        width: 100%;
+    }
+
+    #appWrap {
+        align-content: center;
+    }
+
+}
+
+/*MARK:@Desktop PWA
+*/
+@media (min-width: 1001px) and (display-mode: standalone) {
+
+    /*for desktop PWA users*/
+    #controlPanel {
+        border-radius: 0 10px 0 0
+    }
+
+    #userListsWrap {
+        border-radius: 10px 0 0 0;
+    }
+}

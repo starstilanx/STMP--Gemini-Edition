@@ -5,6 +5,47 @@ It also includes a sidebar chat for users only, and many tools for the Host to c
 
 Created by RossAscends
 
+---
+
+## Gemini Edition
+
+This fork includes additional features and enhancements developed with AI assistance.
+
+### New Features
+
+#### Character Editor Tab
+
+A dedicated Character Editor section in the Control Panel for viewing and editing SillyTavern character card metadata directly from the UI.
+
+**Supported Fields:**
+- **Core v2 Fields**: Name, Description, First Message
+- **Extended v2 Fields**: Personality, Scenario, System Prompt, Post-History Instructions, Creator Notes, Example Messages
+- **Alternate Greetings**: Dynamic add/remove support for multiple greeting messages
+
+**How to Use:**
+1. Open the Control Panel (🎛️)
+2. Scroll down and expand the "Character Editor" section
+3. Select a character from the dropdown
+4. Edit any fields as needed
+5. Click **💾 Save** to persist changes to the character PNG file
+
+#### World Info / Lorebook System
+
+Full lorebook support with keyword-triggered context injection:
+- Create and manage multiple lorebooks
+- Add entries with keywords and content
+- Configurable scan depth and token budget
+- Automatic keyword matching and context injection
+
+#### Enhanced Character Import
+
+Drag-and-drop character card import with embedded metadata validation:
+- Supports SillyTavern v1 and v2 character card specifications
+- Validates PNG metadata before accepting uploads
+- Automatically extracts and stores character definitions
+
+---
+
 ## Support and Donations
 
 If this software brings you and your friend's joy, donations to Ross can be made via:

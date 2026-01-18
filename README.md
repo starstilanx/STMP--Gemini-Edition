@@ -44,6 +44,22 @@ Drag-and-drop character card import with embedded metadata validation:
 - Validates PNG metadata before accepting uploads
 - Automatically extracts and stores character definitions
 
+#### Personas
+
+User persona support for personalized roleplay experiences:
+- Create and manage multiple user personas
+- Each persona includes name, description, and personality traits
+- Quickly switch between personas during chat sessions
+- Persona context is injected into AI prompts for more immersive interactions
+
+#### Gemini API Support
+
+Native support for Google's Gemini API:
+- Added Gemini as a first-class API option alongside existing providers
+- Supports Gemini Pro and other Gemini model variants
+- Full streaming support for real-time responses
+- Easy configuration through the API settings panel
+
 ---
 
 ## Support and Donations

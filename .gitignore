@@ -145,6 +145,11 @@ lockfile.lock
 stmp.db-wal
 stmp.db-shm
 
+#Claude fragments (but keep CLAUDE.MD)
+.claude_*
+CLAUDE_FRAGMENTS/
+
 #Don't ignore the following files
 !public/api-presets/Tabby-Deterministic.json
 !public/api-presets/Tabby-Temp-2_MinP-0.2.json
+!CLAUDE.MD

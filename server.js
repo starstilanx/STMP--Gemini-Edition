@@ -562,9 +562,7 @@ function setWsRoom(ws, roomId, userId) {
     const prevRoom = wsToRoom.get(ws);
     if (prevRoom && roomsState.has(prevRoom)) {
         roomsState.get(prevRoom).delete(ws);
-        if (roomsState.get(prevRoom).size === 0) {
-            // Keep empty room state for now (room persists)
-        }
+        logger.info(`[Room] User ${userId} left room ${prevRoom}`);
     }
     
     // Add to new room
@@ -576,7 +574,9 @@ function setWsRoom(ws, roomId, userId) {
     }
     roomsState.get(roomId).add(ws);
     
-    logger.info(`[Room] User ${userId} joined room ${roomId}`);
+    // Verify the mapping was set
+    const verifyRoom = wsToRoom.get(ws);
+    logger.info(`[Room] User ${userId} joined room ${roomId}. Verified wsToRoom: ${verifyRoom}`);
 }
 
 /**
@@ -777,6 +777,12 @@ async function initFiles() {
     }
 
     await mainInit();
+    
+    // Ensure global room exists and migrate legacy sessions
+    logger.info('Ensuring global room and migrating legacy data...');
+    await db.createDefaultGlobalRoom();
+    await db.migrateExistingDataToGlobalRoom();
+    
     let [hostKey, modKey] = generateServerKeys();
 
     console.log('')
@@ -2301,6 +2307,9 @@ async function handleConnections(ws, type, request) {
                     // Get room config
                     const roomConfig = await getRoomConfig(roomId);
                     
+                    // Get room's past chats for the control panel
+                    const pastChats = await db.getPastChats('ai', roomId);
+                    
                     ws.send(JSON.stringify({
                         type: 'roomJoined',
                         room: {
@@ -2317,7 +2326,8 @@ async function handleConnections(ws, type, request) {
                         })),
                         chatHistory: markdownifyChatHistoriesArray(chatHistory),
                         sessionId: sessionId,
-                        config: roomConfig
+                        config: roomConfig,
+                        pastChats: pastChats // Include room-specific past chats
                     }));
                     
                     // Notify other room members

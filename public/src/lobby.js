@@ -1,6 +1,7 @@
 // Lobby/Rooms functionality for STMP
 
 import { socket, myUUID, myUsername, myUserColor } from '../script.js';
+import controls from './controls.js';
 
 // State
 export let currentRoomId = null;
@@ -354,6 +355,12 @@ export function handleRoomJoined(data) {
         // The room config contains selectedCharacter etc.
         // This would update the UI to show room's character
         console.log('[Lobby] Room config:', data.config);
+    }
+    
+    // Update Past Chats list with room-specific past chats
+    if (data.pastChats) {
+        controls.showPastChats(data.pastChats);
+        console.log(`[Lobby] Updated Past Chats with ${Object.keys(data.pastChats).length} items for room`);
     }
     
     console.log(`[Lobby] Joined room: ${data.room.name} with ${data.members?.length || 0} members`);

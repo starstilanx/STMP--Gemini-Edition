@@ -141,6 +141,7 @@ config.json
 lockfile.lock
 stmp.db-wal
 stmp.db-shm
+Implementation/*
 
 #Claude fragments (but keep CLAUDE.MD)
 .claude_*

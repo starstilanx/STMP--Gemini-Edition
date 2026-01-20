@@ -1,8 +1,8 @@
 import sqlite3 from 'sqlite3';
 import { open } from 'sqlite';
 import { dbLogger as logger } from './log.js';
-import apiCalls from './api-calls.js';
 import bcrypt from 'bcrypt';
+import { v4 as uuidv4 } from 'uuid';
 
 
 // Connect to the SQLite database
@@ -21,6 +21,30 @@ const dbPromise = open({
 });
 
 const schemaDictionary = {
+    // Room tables for message isolation
+    rooms: {
+        room_id: "TEXT UNIQUE PRIMARY KEY",
+        name: "TEXT NOT NULL",
+        description: "TEXT",
+        created_by: "TEXT",
+        created_at: "DATETIME DEFAULT CURRENT_TIMESTAMP",
+        settings: "TEXT", // JSON: room-specific config (character, API, etc.)
+        is_active: "BOOLEAN DEFAULT TRUE", // Soft delete flag
+        foreignKeys: {
+            created_by: "users(user_id)"
+        }
+    },
+    room_members: {
+        id: "INTEGER PRIMARY KEY", // Composite key workaround
+        room_id: "TEXT NOT NULL",
+        user_id: "TEXT NOT NULL",
+        joined_at: "DATETIME DEFAULT CURRENT_TIMESTAMP",
+        role: "TEXT DEFAULT 'member'", // 'creator', 'moderator', 'member'
+        foreignKeys: {
+            room_id: "rooms(room_id)",
+            user_id: "users(user_id)"
+        }
+    },
     users: {
         user_id: "TEXT UNIQUE PRIMARY KEY",
         username: "TEXT",
@@ -49,6 +73,7 @@ const schemaDictionary = {
     aichats: {
         message_id: "INTEGER PRIMARY KEY",
         session_id: "INTEGER",
+        room_id: "TEXT", // Room isolation - CRITICAL for sync safety
         user_id: "TEXT",
         username: "TEXT",
         message: "TEXT",
@@ -56,32 +81,43 @@ const schemaDictionary = {
         timestamp: "DATETIME DEFAULT CURRENT_TIMESTAMP",
         foreignKeys: {
             session_id: "sessions(session_id)",
-            user_id: "users(user_id)"
+            user_id: "users(user_id)",
+            room_id: "rooms(room_id)"
         }
     },
     userchats: {
         message_id: "INTEGER PRIMARY KEY",
         session_id: "INTEGER",
+        room_id: "TEXT", // Room isolation - CRITICAL for sync safety
         user_id: "TEXT",
         message: "TEXT",
         timestamp: "DATETIME DEFAULT CURRENT_TIMESTAMP",
         active: "BOOLEAN DEFAULT TRUE",
         foreignKeys: {
             session_id: "userSessions(session_id)",
-            user_id: "users(user_id)"
+            user_id: "users(user_id)",
+            room_id: "rooms(room_id)"
         }
     },
     sessions: {
         session_id: "INTEGER PRIMARY KEY",
+        room_id: "TEXT", // Room isolation - CRITICAL for sync safety
         started_at: "DATETIME DEFAULT CURRENT_TIMESTAMP",
         ended_at: "DATETIME",
-        is_active: "BOOLEAN DEFAULT TRUE"
+        is_active: "BOOLEAN DEFAULT TRUE",
+        foreignKeys: {
+            room_id: "rooms(room_id)"
+        }
     },
     userSessions: {
         session_id: "INTEGER PRIMARY KEY",
+        room_id: "TEXT", // Room isolation - CRITICAL for sync safety
         started_at: "DATETIME DEFAULT CURRENT_TIMESTAMP",
         ended_at: "DATETIME",
-        is_active: "BOOLEAN DEFAULT TRUE"
+        is_active: "BOOLEAN DEFAULT TRUE",
+        foreignKeys: {
+            room_id: "rooms(room_id)"
+        }
     },
     apis: {
         name: "TEXT UNIQUE PRIMARY KEY",
@@ -154,7 +190,6 @@ async function processWriteQueue() {
         //logger.info(`Completed database write for operation: ${operationName}`);
         resolve(result);
     } catch (err) {
-        55
         if (transactionStarted) {
             try {
                 await db.run('ROLLBACK');
@@ -259,18 +294,32 @@ async function writeUserChatMessage(userId, message) {
 }
 
 
-async function getPastChats(type) {
-    logger.debug(`Getting data for all past ${type} chats...`);
+// If roomId is provided, only return sessions for that room
+async function getPastChats(type, roomId = null) {
+    logger.info(`[getPastChats] Getting data for past ${type} chats... Room: ${roomId || 'ALL (global)'}`);
     const db = await dbPromise;
     try {
-        const rows = await db.all(`
-            SELECT s.session_id, s.started_at, s.ended_at, s.is_active, a.user_id, a.timestamp,
+        // Build query with optional room filter
+        // When roomId is provided, only return sessions FOR THAT SPECIFIC ROOM
+        // Sessions with NULL room_id are legacy and won't be shown in specific rooms
+        let roomFilter = '';
+        let params = [];
+        if (roomId) {
+            roomFilter = 'AND s.room_id = ?';
+            params = [roomId];
+        }
+        
+        const query = `
+            SELECT s.session_id, s.started_at, s.ended_at, s.is_active, s.room_id, a.user_id, a.timestamp,
             strftime('%Y-%m-%d %H:%M:%S', a.timestamp, 'localtime') AS local_timestamp
             FROM sessions s
             JOIN aichats a ON s.session_id = a.session_id
-            JOIN sessions s2 ON s.session_id = s2.session_id
+            WHERE 1=1 ${roomFilter}
             ORDER BY s.started_at ASC
-        `);
+        `;
+        
+        logger.debug(`[getPastChats] Query: ${query.replace(/\s+/g, ' ').trim()}, Params: ${JSON.stringify(params)}`);
+        const rows = await db.all(query, params);
 
         const result = {};
 
@@ -281,6 +330,7 @@ async function getPastChats(type) {
             if (!result[sessionID]) {
                 result[sessionID] = {
                     session_id: row.session_id,
+                    room_id: row.room_id,
                     started_at: row.started_at,
                     ended_at: row.ended_at,
                     is_active: row.is_active,
@@ -471,18 +521,40 @@ async function removeLastAIChatMessage() {
     }, []);
 }
 
-async function setActiveChat(sessionID) {
-    logger.info('Setting session ' + sessionID + ' as active...');
-    //const db = await dbPromise;
+// If roomId is provided, only deactivate sessions in that room
+async function setActiveChat(sessionID, roomId = null) {
+    logger.info('Setting session ' + sessionID + ' as active...' + (roomId ? ` (room: ${roomId})` : ''));
     return queueDatabaseWrite(async (db) => {
         try {
-            await db.run('UPDATE sessions SET is_active = 0 WHERE is_active = 1');
+            if (roomId) {
+                // Only deactivate sessions in the same room
+                await db.run('UPDATE sessions SET is_active = 0 WHERE is_active = 1 AND room_id = ?', [roomId]);
+            } else {
+                // Global deactivation (backward compatibility)
+                await db.run('UPDATE sessions SET is_active = 0 WHERE is_active = 1');
+            }
             await db.run('UPDATE sessions SET is_active = 1 WHERE session_id = ?', [sessionID]);
             logger.info(`Session ${sessionID} was set as active.`);
         } catch (err) {
             logger.error(`Error setting session ${sessionID} as active:`, err);
         }
-    }, [sessionID]);
+    }, [sessionID, roomId]);
+}
+
+/**
+ * Get the room a session belongs to
+ * @param {number} sessionId - Session ID
+ * @returns {Promise<object|null>} Session info with room_id, or null
+ */
+async function getSessionRoom(sessionId) {
+    const db = await dbPromise;
+    try {
+        const row = await db.get('SELECT session_id, room_id FROM sessions WHERE session_id = ?', [sessionId]);
+        return row || null;
+    } catch (err) {
+        logger.error(`Error getting session room for ${sessionId}:`, err);
+        return null;
+    }
 }
 
 async function getActiveChat() {
@@ -514,28 +586,49 @@ function collapseNewlines(x) {
 }
 
 // Write an AI chat message to the database
-async function writeAIChatMessage(username, userId, message, entity) {
-    logger.info('Writing AI chat message...Username: ' + username + ', User ID: ' + userId + ', Entity: ' + entity);
+// If roomId is provided, writes to a room-specific session
+async function writeAIChatMessage(username, userId, message, entity, roomId = null) {
+    logger.info('Writing AI chat message...Username: ' + username + ', User ID: ' + userId + ', Entity: ' + entity + ', RoomID: ' + (roomId || 'global'));
 
-    //logger.debug('Writing AI chat message...Username: ' + username + ', User ID: ' + userId + ', Entity: ' + entity);
-    //const db = await dbPromise;
     return queueDatabaseWrite(async (db) => {
         collapseNewlines(message)
         try {
             let sessionId;
-            const row = await db.get('SELECT session_id FROM sessions WHERE is_active = TRUE');
-            if (!row) {
-                logger.warn('No active session found, creating a new session...');
-                await db.run('INSERT INTO sessions DEFAULT VALUES');
-                sessionId = (await db.get('SELECT session_id FROM sessions WHERE is_active = TRUE')).session_id;
-                logger.info(`A new session was created with session_id ${sessionId}`);
+            
+            if (roomId) {
+                // Get or create a room-specific session
+                const row = await db.get(
+                    'SELECT session_id FROM sessions WHERE room_id = ? AND is_active = TRUE',
+                    [roomId]
+                );
+                if (!row) {
+                    logger.info(`No active session found for room ${roomId}, creating a new session...`);
+                    await db.run('INSERT INTO sessions (room_id) VALUES (?)', [roomId]);
+                    sessionId = (await db.get(
+                        'SELECT session_id FROM sessions WHERE room_id = ? AND is_active = TRUE',
+                        [roomId]
+                    )).session_id;
+                    logger.info(`New room session created with session_id ${sessionId} for room ${roomId}`);
+                } else {
+                    sessionId = row.session_id;
+                }
             } else {
-                sessionId = row.session_id;
+                // Fallback to global session (backward compatibility)
+                const row = await db.get('SELECT session_id FROM sessions WHERE is_active = TRUE');
+                if (!row) {
+                    logger.warn('No active session found, creating a new session...');
+                    await db.run('INSERT INTO sessions DEFAULT VALUES');
+                    sessionId = (await db.get('SELECT session_id FROM sessions WHERE is_active = TRUE')).session_id;
+                    logger.info(`A new session was created with session_id ${sessionId}`);
+                } else {
+                    sessionId = row.session_id;
+                }
             }
+            
             const timestamp = new Date().toISOString();
             await db.run(
-                'INSERT INTO aichats (session_id, user_id, message, username, entity, timestamp) VALUES (?, ?, ?, ?, ?, ?)',
-                [sessionId, userId, message, username, entity, timestamp]
+                'INSERT INTO aichats (session_id, user_id, message, username, entity, timestamp, room_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [sessionId, userId, message, username, entity, timestamp, roomId]
             );
             let resultingMessageID = (await db.get('SELECT message_id FROM aichats WHERE session_id = ? ORDER BY message_id DESC LIMIT 1', [sessionId]))?.message_id;
 
@@ -544,24 +637,33 @@ async function writeAIChatMessage(username, userId, message, entity) {
         } catch (err) {
             logger.error('Error writing AI chat message:', err);
         }
-    }, [username, userId, message, entity]);
+    }, [username, userId, message, entity, roomId]);
 }
 
-// Update all messages in the current session to a new session ID and clear the current session
-async function newSession() {
-    logger.info('Creating a new session...');
-    //const db = await dbPromise;
+// Create a new session, optionally for a specific room
+async function newSession(roomId = null) {
+    logger.info(`Creating a new session...${roomId ? ` (room: ${roomId})` : ' (global)'}`);
     return queueDatabaseWrite(async (db) => {
         try {
-            await db.run('UPDATE sessions SET is_active = FALSE, ended_at = CURRENT_TIMESTAMP WHERE is_active = TRUE');
-            await db.run('INSERT INTO sessions DEFAULT VALUES');
-            const newSessionID = (await db.get('SELECT session_id FROM sessions WHERE is_active = TRUE')).session_id;
-            logger.info('Creating a new session with session_id ' + newSessionID + '...');
-            return newSessionID;
+            if (roomId) {
+                // Only end sessions in the same room
+                await db.run('UPDATE sessions SET is_active = FALSE, ended_at = CURRENT_TIMESTAMP WHERE is_active = TRUE AND room_id = ?', [roomId]);
+                await db.run('INSERT INTO sessions (room_id, is_active) VALUES (?, TRUE)', [roomId]);
+                const newSessionID = (await db.get('SELECT session_id FROM sessions WHERE is_active = TRUE AND room_id = ?', [roomId])).session_id;
+                logger.info(`Created new room session with session_id ${newSessionID} for room ${roomId}`);
+                return newSessionID;
+            } else {
+                // Global session (backward compatibility)
+                await db.run('UPDATE sessions SET is_active = FALSE, ended_at = CURRENT_TIMESTAMP WHERE is_active = TRUE');
+                await db.run('INSERT INTO sessions DEFAULT VALUES');
+                const newSessionID = (await db.get('SELECT session_id FROM sessions WHERE is_active = TRUE')).session_id;
+                logger.info('Creating a new session with session_id ' + newSessionID + '...');
+                return newSessionID;
+            }
         } catch (error) {
             logger.error('Error creating a new session:', error);
         }
-    }, []);
+    }, [roomId]);
 }
 
 // mark currently active user chat entries as inactive
@@ -674,12 +776,23 @@ async function getUser(uuid) {
 }
 
 // Read AI chat data from the SQLite database
-async function readAIChat(sessionID = null) {
+// If roomId is provided, reads only from that room's session
+async function readAIChat(sessionID = null, roomId = null) {
     const db = await dbPromise;
     let wasAutoDiscovered = false;
 
     if (!sessionID) {
-        const activeSession = await db.get('SELECT session_id FROM sessions WHERE is_active = 1 LIMIT 1');
+        let activeSession;
+        if (roomId) {
+            // Get active session for specific room
+            activeSession = await db.get(
+                'SELECT session_id FROM sessions WHERE room_id = ? AND is_active = 1 LIMIT 1',
+                [roomId]
+            );
+        } else {
+            // Fallback to global active session (backward compatibility)
+            activeSession = await db.get('SELECT session_id FROM sessions WHERE is_active = 1 LIMIT 1');
+        }
         if (!activeSession) return [JSON.stringify([]), null];
         sessionID = activeSession.session_id;
         wasAutoDiscovered = true;
@@ -1340,6 +1453,481 @@ async function authenticateUser(username, password) {
     }
 }
 
+// ============================================================================
+// ROOM MANAGEMENT FUNCTIONS - Critical for message isolation
+// ============================================================================
+
+// Global Room ID constant - used for migration and fallback
+const GLOBAL_ROOM_ID = 'global-room-00000000-0000-0000-0000-000000000000';
+
+/**
+ * Create a new room
+ * @param {string} name - Room display name
+ * @param {string} description - Room description
+ * @param {string} createdBy - User ID of creator
+ * @param {object} settings - Room-specific settings (JSON-serializable)
+ * @returns {Promise<object>} Created room object
+ */
+async function createRoom(name, description = '', createdBy = null, settings = {}) {
+    logger.info(`Creating room: ${name}`);
+    
+    return queueDatabaseWrite(async (db) => {
+        const room_id = uuidv4();
+        const settingsJson = JSON.stringify(settings);
+        
+        await db.run(
+            `INSERT INTO rooms (room_id, name, description, created_by, settings, is_active, created_at) 
+             VALUES (?, ?, ?, ?, ?, TRUE, CURRENT_TIMESTAMP)`,
+            [room_id, name, description, createdBy, settingsJson]
+        );
+        
+        // If creator specified, add them as room member with 'creator' role
+        if (createdBy) {
+            await db.run(
+                `INSERT INTO room_members (room_id, user_id, role, joined_at) 
+                 VALUES (?, ?, 'creator', CURRENT_TIMESTAMP)`,
+                [room_id, createdBy]
+            );
+        }
+        
+        // Create initial session for the room
+        await db.run(
+            `INSERT INTO sessions (room_id, started_at, is_active) 
+             VALUES (?, CURRENT_TIMESTAMP, TRUE)`,
+            [room_id]
+        );
+        
+        await db.run(
+            `INSERT INTO userSessions (room_id, started_at, is_active) 
+             VALUES (?, CURRENT_TIMESTAMP, TRUE)`,
+            [room_id]
+        );
+        
+        logger.info(`Room created: ${name} (${room_id})`);
+        
+        return {
+            room_id,
+            name,
+            description,
+            created_by: createdBy,
+            settings,
+            is_active: true,
+            created_at: new Date().toISOString()
+        };
+    }, []);
+}
+
+/**
+ * Get room by ID
+ * @param {string} roomId - Room ID
+ * @returns {Promise<object|null>} Room object or null
+ */
+async function getRoomById(roomId) {
+    const db = await dbPromise;
+    try {
+        const room = await db.get('SELECT * FROM rooms WHERE room_id = ? AND is_active = TRUE', [roomId]);
+        if (room && room.settings) {
+            room.settings = JSON.parse(room.settings);
+        }
+        return room;
+    } catch (err) {
+        logger.error('Error getting room:', err);
+        return null;
+    }
+}
+
+/**
+ * Get all active rooms with member counts
+ * @returns {Promise<Array>} Array of room objects with member counts
+ */
+async function getAllActiveRooms() {
+    const db = await dbPromise;
+    try {
+        const rooms = await db.all(`
+            SELECT 
+                r.room_id,
+                r.name,
+                r.description,
+                r.created_by,
+                r.created_at,
+                r.settings,
+                COUNT(rm.user_id) as member_count,
+                GROUP_CONCAT(u.username, ', ') as member_names
+            FROM rooms r
+            LEFT JOIN room_members rm ON r.room_id = rm.room_id
+            LEFT JOIN users u ON rm.user_id = u.user_id
+            WHERE r.is_active = TRUE
+            GROUP BY r.room_id
+            ORDER BY r.created_at DESC
+        `);
+        
+        return rooms.map(room => ({
+            ...room,
+            settings: room.settings ? JSON.parse(room.settings) : {}
+        }));
+    } catch (err) {
+        logger.error('Error getting active rooms:', err);
+        return [];
+    }
+}
+
+/**
+ * Update room settings
+ * @param {string} roomId - Room ID
+ * @param {object} updates - Object with name, description, and/or settings
+ * @returns {Promise<boolean>} Success status
+ */
+async function updateRoomSettings(roomId, updates) {
+    logger.info(`Updating room settings: ${roomId}`);
+    
+    return queueDatabaseWrite(async (db) => {
+        const { name, description, settings } = updates;
+        
+        // Build dynamic update query
+        const setClauses = [];
+        const params = [];
+        
+        if (name !== undefined) {
+            setClauses.push('name = ?');
+            params.push(name);
+        }
+        if (description !== undefined) {
+            setClauses.push('description = ?');
+            params.push(description);
+        }
+        if (settings !== undefined) {
+            setClauses.push('settings = ?');
+            params.push(JSON.stringify(settings));
+        }
+        
+        if (setClauses.length === 0) {
+            return true; // Nothing to update
+        }
+        
+        params.push(roomId);
+        
+        await db.run(
+            `UPDATE rooms SET ${setClauses.join(', ')} WHERE room_id = ?`,
+            params
+        );
+        
+        logger.info(`Room settings updated: ${roomId}`);
+        return true;
+    }, []);
+}
+
+/**
+ * Soft delete a room (set is_active = FALSE)
+ * Rooms are never truly deleted to preserve chat history
+ * @param {string} roomId - Room ID
+ * @returns {Promise<boolean>} Success status
+ */
+async function deleteRoom(roomId) {
+    logger.info(`Soft-deleting room: ${roomId}`);
+    
+    // Prevent deletion of global room
+    if (roomId === GLOBAL_ROOM_ID) {
+        logger.warn('Attempted to delete global room - denied');
+        return false;
+    }
+    
+    return queueDatabaseWrite(async (db) => {
+        await db.run('UPDATE rooms SET is_active = FALSE WHERE room_id = ?', [roomId]);
+        
+        // Remove all members
+        await db.run('DELETE FROM room_members WHERE room_id = ?', [roomId]);
+        
+        logger.info(`Room soft-deleted: ${roomId}`);
+        return true;
+    }, []);
+}
+
+/**
+ * Add a user to a room
+ * @param {string} roomId - Room ID
+ * @param {string} userId - User ID
+ * @param {string} role - Role: 'creator', 'moderator', or 'member'
+ * @returns {Promise<boolean>} Success status
+ */
+async function addRoomMember(roomId, userId, role = 'member') {
+    logger.info(`Adding member ${userId} to room ${roomId} with role ${role}`);
+    
+    return queueDatabaseWrite(async (db) => {
+        // Check if already a member
+        const existing = await db.get(
+            'SELECT * FROM room_members WHERE room_id = ? AND user_id = ?',
+            [roomId, userId]
+        );
+        
+        if (existing) {
+            logger.debug(`User ${userId} already in room ${roomId}`);
+            return true;
+        }
+        
+        await db.run(
+            `INSERT INTO room_members (room_id, user_id, role, joined_at) 
+             VALUES (?, ?, ?, CURRENT_TIMESTAMP)`,
+            [roomId, userId, role]
+        );
+        
+        logger.info(`Member added: ${userId} to room ${roomId}`);
+        return true;
+    }, []);
+}
+
+/**
+ * Remove a user from a room
+ * @param {string} roomId - Room ID
+ * @param {string} userId - User ID
+ * @returns {Promise<boolean>} Success status
+ */
+async function removeRoomMember(roomId, userId) {
+    logger.info(`Removing member ${userId} from room ${roomId}`);
+    
+    return queueDatabaseWrite(async (db) => {
+        await db.run(
+            'DELETE FROM room_members WHERE room_id = ? AND user_id = ?',
+            [roomId, userId]
+        );
+        
+        logger.info(`Member removed: ${userId} from room ${roomId}`);
+        return true;
+    }, []);
+}
+
+/**
+ * Get all members of a room
+ * @param {string} roomId - Room ID
+ * @returns {Promise<Array>} Array of member objects
+ */
+async function getRoomMembers(roomId) {
+    const db = await dbPromise;
+    try {
+        return await db.all(`
+            SELECT 
+                rm.user_id,
+                rm.role,
+                rm.joined_at,
+                u.username,
+                u.username_color,
+                u.persona
+            FROM room_members rm
+            LEFT JOIN users u ON rm.user_id = u.user_id
+            WHERE rm.room_id = ?
+            ORDER BY rm.joined_at ASC
+        `, [roomId]);
+    } catch (err) {
+        logger.error('Error getting room members:', err);
+        return [];
+    }
+}
+
+/**
+ * Get all rooms a user is a member of
+ * @param {string} userId - User ID
+ * @returns {Promise<Array>} Array of room objects
+ */
+async function getUserRooms(userId) {
+    const db = await dbPromise;
+    try {
+        const rooms = await db.all(`
+            SELECT 
+                r.room_id,
+                r.name,
+                r.description,
+                r.settings,
+                rm.role,
+                rm.joined_at
+            FROM room_members rm
+            JOIN rooms r ON rm.room_id = r.room_id
+            WHERE rm.user_id = ? AND r.is_active = TRUE
+            ORDER BY rm.joined_at DESC
+        `, [userId]);
+        
+        return rooms.map(room => ({
+            ...room,
+            settings: room.settings ? JSON.parse(room.settings) : {}
+        }));
+    } catch (err) {
+        logger.error('Error getting user rooms:', err);
+        return [];
+    }
+}
+
+/**
+ * Get active session for a room
+ * @param {string} roomId - Room ID
+ * @param {string} type - 'ai' or 'user'
+ * @returns {Promise<number|null>} Session ID or null
+ */
+async function getRoomActiveSession(roomId, type = 'ai') {
+    const db = await dbPromise;
+    const table = type === 'ai' ? 'sessions' : 'userSessions';
+    
+    try {
+        const session = await db.get(
+            `SELECT session_id FROM ${table} WHERE room_id = ? AND is_active = TRUE LIMIT 1`,
+            [roomId]
+        );
+        return session?.session_id || null;
+    } catch (err) {
+        logger.error(`Error getting room ${type} session:`, err);
+        return null;
+    }
+}
+
+/**
+ * Check if user is a member of a room
+ * @param {string} roomId - Room ID
+ * @param {string} userId - User ID
+ * @returns {Promise<boolean>} True if user is in room
+ */
+async function isUserInRoom(roomId, userId) {
+    const db = await dbPromise;
+    try {
+        const member = await db.get(
+            'SELECT 1 FROM room_members WHERE room_id = ? AND user_id = ?',
+            [roomId, userId]
+        );
+        return !!member;
+    } catch (err) {
+        logger.error('Error checking room membership:', err);
+        return false;
+    }
+}
+
+/**
+ * Get user's role in a room
+ * @param {string} roomId - Room ID
+ * @param {string} userId - User ID
+ * @returns {Promise<string|null>} Role or null if not in room
+ */
+async function getUserRoomRole(roomId, userId) {
+    const db = await dbPromise;
+    try {
+        const member = await db.get(
+            'SELECT role FROM room_members WHERE room_id = ? AND user_id = ?',
+            [roomId, userId]
+        );
+        return member?.role || null;
+    } catch (err) {
+        logger.error('Error getting user room role:', err);
+        return null;
+    }
+}
+
+// ============================================================================
+// MIGRATION: Create global room and migrate existing data
+// ============================================================================
+
+/**
+ * Create default global room if it doesn't exist
+ * This room is used for backward compatibility with existing data
+ */
+async function createDefaultGlobalRoom() {
+    const db = await dbPromise;
+    
+    try {
+        // Check if global room already exists
+        const existing = await db.get(
+            'SELECT room_id FROM rooms WHERE room_id = ?',
+            [GLOBAL_ROOM_ID]
+        );
+        
+        if (existing) {
+            logger.debug('Global room already exists');
+            return GLOBAL_ROOM_ID;
+        }
+        
+        logger.info('Creating default Global Room for backward compatibility...');
+        
+        // Create global room directly (bypass queue since this runs during init)
+        await db.run(
+            `INSERT INTO rooms (room_id, name, description, created_by, settings, is_active, created_at) 
+             VALUES (?, 'Global Room', 'Default room for all users (backward compatibility)', NULL, '{}', TRUE, CURRENT_TIMESTAMP)`,
+            [GLOBAL_ROOM_ID]
+        );
+        
+        // Create session for global room
+        await db.run(
+            `INSERT INTO sessions (room_id, started_at, is_active) 
+             VALUES (?, CURRENT_TIMESTAMP, TRUE)`,
+            [GLOBAL_ROOM_ID]
+        );
+        
+        await db.run(
+            `INSERT INTO userSessions (room_id, started_at, is_active) 
+             VALUES (?, CURRENT_TIMESTAMP, TRUE)`,
+            [GLOBAL_ROOM_ID]
+        );
+        
+        logger.info('Global Room created successfully');
+        return GLOBAL_ROOM_ID;
+    } catch (err) {
+        logger.error('Error creating global room:', err);
+        throw err;
+    }
+}
+
+/**
+ * Migrate existing data to global room
+ * This ensures backward compatibility while enabling room isolation
+ */
+async function migrateExistingDataToGlobalRoom() {
+    const db = await dbPromise;
+    
+    try {
+        // Check if migration is needed (any data without room_id)
+        const needsMigration = await db.get(
+            'SELECT 1 FROM aichats WHERE room_id IS NULL LIMIT 1'
+        );
+        
+        if (!needsMigration) {
+            logger.debug('No migration needed - all data already has room_id');
+            return;
+        }
+        
+        logger.info('Migrating existing data to Global Room...');
+        
+        // Ensure global room exists
+        await createDefaultGlobalRoom();
+        
+        // Migrate sessions
+        const sessionResult = await db.run(
+            'UPDATE sessions SET room_id = ? WHERE room_id IS NULL',
+            [GLOBAL_ROOM_ID]
+        );
+        logger.info(`Migrated ${sessionResult.changes || 0} sessions to Global Room`);
+        
+        // Migrate userSessions
+        const userSessionResult = await db.run(
+            'UPDATE userSessions SET room_id = ? WHERE room_id IS NULL',
+            [GLOBAL_ROOM_ID]
+        );
+        logger.info(`Migrated ${userSessionResult.changes || 0} userSessions to Global Room`);
+        
+        // Migrate aichats
+        const aiChatResult = await db.run(
+            'UPDATE aichats SET room_id = ? WHERE room_id IS NULL',
+            [GLOBAL_ROOM_ID]
+        );
+        logger.info(`Migrated ${aiChatResult.changes || 0} AI chat messages to Global Room`);
+        
+        // Migrate userchats
+        const userChatResult = await db.run(
+            'UPDATE userchats SET room_id = ? WHERE room_id IS NULL',
+            [GLOBAL_ROOM_ID]
+        );
+        logger.info(`Migrated ${userChatResult.changes || 0} user chat messages to Global Room`);
+        
+        logger.info('Migration to Global Room completed successfully');
+    } catch (err) {
+        logger.error('Error during migration:', err);
+        throw err;
+    }
+}
+
+// Initialize database schema synchronously, migration runs on first DB access
 ensureDatabaseSchema(schemaDictionary);
 
 
@@ -1373,6 +1961,7 @@ export default {
     getNextMessageID,
     setActiveChat,
     getActiveChat,
+    getSessionRoom,
     exportSession,
     // Lorebook / World Info functions
     createLorebook,
@@ -1389,5 +1978,21 @@ export default {
     checkUsernameAvailable,
     getUserByUsername,
     registerUser,
-    authenticateUser
-}
+    authenticateUser,
+    // Room Management functions
+    createRoom,
+    getRoomById,
+    getAllActiveRooms,
+    updateRoomSettings,
+    deleteRoom,
+    addRoomMember,
+    removeRoomMember,
+    getRoomMembers,
+    getUserRooms,
+    getRoomActiveSession,
+    isUserInRoom,
+    getUserRoomRole,
+    createDefaultGlobalRoom,
+    migrateExistingDataToGlobalRoom,
+    GLOBAL_ROOM_ID
+};

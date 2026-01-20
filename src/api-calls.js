@@ -99,7 +99,8 @@ async function getAIResponse(isStreaming, hordeKey, engineMode, user, liveConfig
             }
         } catch (_) { /* noop */ }
 
-        const [fullPrompt, includedChatObjects, lastInContextMessageID] = await addCharDefsToPrompt(liveConfig, charFile, formattedCharName, parsedMessage.username, liveAPI, shouldContinue, continueTarget, user.persona);
+        // Pass roomId for room-scoped chat history
+        const [fullPrompt, includedChatObjects, lastInContextMessageID] = await addCharDefsToPrompt(liveConfig, charFile, formattedCharName, parsedMessage.username, liveAPI, shouldContinue, continueTarget, user.persona, parsedMessage?.roomId);
         const samplerData = await fio.readFile(liveConfig.promptConfig.selectedSamplerPreset);
         const samplers = JSON.parse(samplerData);
         //logger.info('[getAIResponse] >> samplers:', samplerData)
@@ -288,10 +289,11 @@ function trimIncompleteSentences(input, include_newline = false) {
     return s.trimEnd();
 }
 
-async function ObjectifyChatHistory() {
+async function ObjectifyChatHistory(roomId = null) {
     return new Promise(async (resolve, reject) => {
         await delay(100)
-        let [data, sessionID] = await db.readAIChat();
+        // Pass roomId for room-scoped chat reading
+        let [data, sessionID] = await db.readAIChat(null, roomId);
         try {
             // Parse the existing contents as a JSON array
             let chatHistory = JSON.parse(data);
@@ -529,7 +531,7 @@ async function buildTCPrompt({
 // this function does a lot more than just add character definitions to the prompt.
 // it also crafts the entire prompt, including system message, dynamic insertions, chat history, and the last user message.
 // it contains methods for TC and CC; this really should be split up somehow.
-async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharName, username, liveAPI, shouldContinue, continueTarget = null, userPersona = '') {
+async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharName, username, liveAPI, shouldContinue, continueTarget = null, userPersona = '', roomId = null) {
     //logger.debug(`[addCharDefsToPrompt] >> GO`)
     //logger.debug(liveAPI)
     let isClaude = liveAPI.claude
@@ -561,7 +563,8 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
                 // Minimal stub to allow macro replacement without pulling defs
                 charData = JSON.stringify({ name: liveConfig.promptConfig.selectedCharacterDisplayName || 'Character', description: '', data: { name: liveConfig.promptConfig.selectedCharacterDisplayName || 'Character', description: '', first_mes: '' } });
             }
-            let chatHistory = await ObjectifyChatHistory()
+            // Pass roomId for room-scoped chat history
+            let chatHistory = await ObjectifyChatHistory(roomId)
             if (continueTarget && continueTarget.sessionID) {
                 // Truncate chat history to include only messages up to and including the target mesID
                 try {

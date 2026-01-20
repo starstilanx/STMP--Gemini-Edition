@@ -8,33 +8,43 @@ export let currentRoom = null;
 export let currentRoomMembers = [];
 let roomsList = [];
 
-// DOM Elements
-const lobbyOverlay = document.getElementById('lobbyOverlay');
-const lobbyRoomList = document.getElementById('lobbyRoomList');
-const createRoomBtn = document.getElementById('createRoomBtn');
-const createRoomDialog = document.getElementById('createRoomDialog');
-const newRoomName = document.getElementById('newRoomName');
-const newRoomDescription = document.getElementById('newRoomDescription');
-const cancelCreateRoom = document.getElementById('cancelCreateRoom');
-const confirmCreateRoom = document.getElementById('confirmCreateRoom');
-const currentRoomHeader = document.getElementById('currentRoomHeader');
-const currentRoomNameEl = document.getElementById('currentRoomName');
-const currentRoomMemberCount = document.getElementById('currentRoomMemberCount');
-const roomMembersList = document.getElementById('roomMembersList');
-const roomSettingsBtn = document.getElementById('roomSettingsBtn');
-const leaveRoomBtn = document.getElementById('leaveRoomBtn');
+// DOM Elements (initialized in initLobby to ensure DOM is ready)
+let lobbyOverlay, lobbyRoomList, createRoomBtn, createRoomDialog;
+let newRoomName, newRoomDescription, cancelCreateRoom, confirmCreateRoom;
+let currentRoomHeader, currentRoomNameEl, currentRoomMemberCount;
+let roomMembersList, roomSettingsBtn, leaveRoomBtn;
 
 // Room Settings Dialog Elements
-const roomSettingsDialog = document.getElementById('roomSettingsDialog');
-const roomSettingsName = document.getElementById('roomSettingsName');
-const roomSettingsDescription = document.getElementById('roomSettingsDescription');
-const roomCharacterSelect = document.getElementById('roomCharacterSelect');
-const cancelRoomSettings = document.getElementById('cancelRoomSettings');
-const saveRoomSettings = document.getElementById('saveRoomSettings');
-const deleteRoomBtn = document.getElementById('deleteRoomBtn');
+let roomSettingsDialog, roomSettingsName, roomSettingsDescription;
+let roomCharacterSelect, cancelRoomSettings, saveRoomSettings, deleteRoomBtn;
 
 // Initialize lobby event listeners
 export function initLobby() {
+    // Get DOM elements now that DOM is ready
+    lobbyOverlay = document.getElementById('lobbyOverlay');
+    lobbyRoomList = document.getElementById('lobbyRoomList');
+    createRoomBtn = document.getElementById('createRoomBtn');
+    createRoomDialog = document.getElementById('createRoomDialog');
+    newRoomName = document.getElementById('newRoomName');
+    newRoomDescription = document.getElementById('newRoomDescription');
+    cancelCreateRoom = document.getElementById('cancelCreateRoom');
+    confirmCreateRoom = document.getElementById('confirmCreateRoom');
+    currentRoomHeader = document.getElementById('currentRoomHeader');
+    currentRoomNameEl = document.getElementById('currentRoomName');
+    currentRoomMemberCount = document.getElementById('currentRoomMemberCount');
+    roomMembersList = document.getElementById('roomMembersList');
+    roomSettingsBtn = document.getElementById('roomSettingsBtn');
+    leaveRoomBtn = document.getElementById('leaveRoomBtn');
+    
+    // Room Settings Dialog Elements
+    roomSettingsDialog = document.getElementById('roomSettingsDialog');
+    roomSettingsName = document.getElementById('roomSettingsName');
+    roomSettingsDescription = document.getElementById('roomSettingsDescription');
+    roomCharacterSelect = document.getElementById('roomCharacterSelect');
+    cancelRoomSettings = document.getElementById('cancelRoomSettings');
+    saveRoomSettings = document.getElementById('saveRoomSettings');
+    deleteRoomBtn = document.getElementById('deleteRoomBtn');
+    
     if (!lobbyOverlay) {
         console.warn('[Lobby] Lobby elements not found in DOM');
         return;
@@ -99,6 +109,7 @@ export function initLobby() {
     });
     
     console.log('[Lobby] Lobby initialized');
+    // Lobby will be shown after WebSocket connection is confirmed
 }
 
 // Show the lobby overlay
@@ -295,22 +306,57 @@ export function renderRoomsList(rooms) {
 export function handleRoomJoined(data) {
     currentRoomId = data.room.room_id;
     currentRoom = data.room;
+    currentRoomMembers = data.members || [];
     
     // Hide lobby, show room header
     hideLobby();
     showRoomHeader(data.room, data.members);
     
-    // Update chat display with room's chat history
-    if (data.chatHistory) {
-        // Clear existing chat and load room chat
-        const AIChatEl = document.getElementById('AIChat');
-        if (AIChatEl) {
-            AIChatEl.innerHTML = '';
-            // The chat history will be handled by the normal appendMessages flow
+    // Clear existing chat and load room's chat history
+    const AIChatEl = document.getElementById('AIChat');
+    if (AIChatEl) {
+        AIChatEl.innerHTML = '';
+        
+        // Append room's chat history
+        if (data.chatHistory && Array.isArray(data.chatHistory)) {
+            data.chatHistory.forEach(msg => {
+                const msgDiv = document.createElement('div');
+                msgDiv.dataset.mesid = msg.messageID || '';
+                msgDiv.dataset.sessionid = msg.sessionID || data.sessionId || '';
+                msgDiv.dataset.entitytype = msg.entity || 'unknown';
+                
+                const usernameSpan = document.createElement('span');
+                usernameSpan.className = 'username';
+                usernameSpan.style.color = msg.userColor || 'white';
+                usernameSpan.textContent = msg.username || 'Unknown';
+                
+                const contentSpan = document.createElement('span');
+                contentSpan.className = 'messageContent';
+                contentSpan.innerHTML = msg.content || '';
+                
+                const timeSpan = document.createElement('span');
+                timeSpan.className = 'messageTime';
+                timeSpan.textContent = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString() : '';
+                
+                msgDiv.appendChild(usernameSpan);
+                msgDiv.appendChild(contentSpan);
+                msgDiv.appendChild(timeSpan);
+                AIChatEl.appendChild(msgDiv);
+            });
+            
+            // Scroll to bottom
+            AIChatEl.scrollTop = AIChatEl.scrollHeight;
         }
     }
     
-    console.log(`[Lobby] Joined room: ${data.room.name}`);
+    // Apply room config if provided
+    if (data.config) {
+        // The room config contains selectedCharacter etc.
+        // This would update the UI to show room's character
+        console.log('[Lobby] Room config:', data.config);
+    }
+    
+    console.log(`[Lobby] Joined room: ${data.room.name} with ${data.members?.length || 0} members`);
 }
 
 // Handle room created
@@ -402,9 +448,10 @@ export function handleMemberLeft(data) {
 
 // Handle room settings changed
 export function handleRoomSettingsChanged(data) {
-    if (currentRoomId === data.room.room_id) {
-        currentRoom = data.room;
-        showRoomHeader(data.room, []);
+    if (currentRoom) {
+        // Update current room settings
+        currentRoom.settings = data.settings || currentRoom.settings;
+        console.log('[Lobby] Room settings updated:', data.settings);
     }
 }
 

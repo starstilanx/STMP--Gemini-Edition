@@ -1,6 +1,6 @@
 import { logger } from './log.js';
 import api from './api-calls.js';
-import { broadcast, purifier } from '../server.js';
+import { broadcast, broadcastToRoom, purifier } from '../server.js';
 import db from './db.js';
 import { StringDecoder } from 'string_decoder';
 import { Readable } from 'stream';
@@ -136,7 +136,8 @@ const createTextListener = async (parsedMessage, liveConfig, AIChatUserList, use
                 logger.warn('Editing message ID at end of stream: ', targetMessageID, ' in session ', targetSessionID);
                 await db.editMessage(targetSessionID, targetMessageID, trimmed);
             } else {
-                await db.writeAIChatMessage(liveConfig.promptConfig.selectedCharacterDisplayName, 'AI', trimmed, 'AI');
+                // Pass roomId for room-scoped chat isolation
+                await db.writeAIChatMessage(liveConfig.promptConfig.selectedCharacterDisplayName, 'AI', trimmed, 'AI', parsedMessage?.roomId);
             }
         } catch (e) {
             logger.warn('Failed to persist streamed response to DB:', e?.message || e);
@@ -163,7 +164,12 @@ const createTextListener = async (parsedMessage, liveConfig, AIChatUserList, use
                     timestamp: new Date().toISOString()
         };
         //logger.warn('sending stream end')
-        broadcast(streamEndToken); // Emit the event to clients
+        // ROOM-SCOPED: Use broadcastToRoom if room context available
+        if (parsedMessage?.roomId) {
+            broadcastToRoom(parsedMessage.roomId, streamEndToken);
+        } else {
+            broadcast(streamEndToken);
+        }
         // Notify queue manager / server that this character's response is complete
         responseLifecycleEmitter.emit('responseComplete', {
             characterDisplayName: liveConfig.promptConfig.selectedCharacterDisplayName,
@@ -220,9 +226,15 @@ const createTextListener = async (parsedMessage, liveConfig, AIChatUserList, use
             sessionID: parsedMessage?.continueTarget?.sessionID || sessionID,
             messageID: parsedMessage?.continueTarget?.mesID || messageID,
             lastInContextMessageID: lastInContextMessageID,
-            timestamp: new Date().toISOString()
+            timestamp: new Date().toISOString(),
+            roomId: parsedMessage?.roomId // Include room context
         };
-        await broadcast(streamedTokenMessage);
+        // ROOM-SCOPED: Use broadcastToRoom if room context available
+        if (parsedMessage?.roomId) {
+            await broadcastToRoom(parsedMessage.roomId, streamedTokenMessage);
+        } else {
+            await broadcast(streamedTokenMessage);
+        }
         currentlyStreaming = true;
     };
 };
@@ -241,7 +253,8 @@ async function handleResponse(parsedMessage, selectedAPI, hordeKey, engineMode, 
 
     if (isStreaming) {
         logger.warn('Preparing to stream response (single-pass)...');
-    const [activeChatJSON, foundSessionID] = await db.readAIChat(sessionID);
+        // Pass roomId for room-scoped chat reading
+        const [activeChatJSON, foundSessionID] = await db.readAIChat(sessionID, parsedMessage?.roomId);
         const newMessageID = await db.getNextMessageID();
 
         // Pre-initialize listener using a callback invoked by getAIResponse before the network request
@@ -296,16 +309,21 @@ async function handleResponse(parsedMessage, selectedAPI, hordeKey, engineMode, 
         };
 
         const trimmed = api.trimIncompleteSentences(AIResponse);
-        // Persist and capture DB-assigned message_id and timestamp
+        // Persist and capture DB-assigned message_id and timestamp (with room context)
         const writeMeta = await db.writeAIChatMessage(
-            liveConfig.promptConfig.selectedCharacterDisplayName, 'AI', trimmed, 'AI'
+            liveConfig.promptConfig.selectedCharacterDisplayName, 'AI', trimmed, 'AI', parsedMessage?.roomId
         );
         if (writeMeta) {
             AIResponseMessage.sessionID = writeMeta.sessionId;
             AIResponseMessage.messageID = writeMeta.message_id;
             AIResponseMessage.timestamp = writeMeta.timestamp;
         }
-        await broadcast(AIResponseMessage);
+        // ROOM-SCOPED: Use broadcastToRoom if room context available
+        if (parsedMessage?.roomId) {
+            await broadcastToRoom(parsedMessage.roomId, AIResponseMessage);
+        } else {
+            await broadcast(AIResponseMessage);
+        }
         // Non-streamed completion notification
         responseLifecycleEmitter.emit('responseComplete', {
             characterDisplayName: liveConfig.promptConfig.selectedCharacterDisplayName,

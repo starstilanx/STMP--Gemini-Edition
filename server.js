@@ -274,6 +274,22 @@ function captureQueueContext(parsedMessage, user, selectedAPI, hordeKey, engineM
 
 //MARK: requestAIResponse
 async function handleRequestAIResponse(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig, ws) {
+    // ROOM ISOLATION: If in a room, use room's character config
+    const roomId = parsedMessage?.roomId;
+    if (roomId) {
+        const roomConfig = await getRoomConfig(roomId);
+        if (roomConfig && roomConfig.selectedCharacter) {
+            // Override global config with room's character
+            liveConfig.promptConfig.selectedCharacter = roomConfig.selectedCharacter;
+            liveConfig.promptConfig.selectedCharacterDisplayName = roomConfig.selectedCharacterDisplayName || roomConfig.selectedCharacter;
+            // If room has selectedCharacters array, use that
+            if (roomConfig.selectedCharacters && roomConfig.selectedCharacters.length > 0) {
+                liveConfig.promptConfig.selectedCharacters = roomConfig.selectedCharacters;
+            }
+            logger.info(`[Room] Using room ${roomId} character: ${liveConfig.promptConfig.selectedCharacterDisplayName}`);
+        }
+    }
+    
     migrateSelectedCharactersIfNeeded(liveConfig);
     const trigger = parsedMessage.trigger || 'auto';
     const isManualOrContinue = trigger === 'manual';
@@ -290,7 +306,7 @@ async function handleRequestAIResponse(parsedMessage, user, selectedAPI, hordeKe
 
     // Fallback: if no latestUserMessageText provided (e.g., trigger came from userChat or system), attempt retrieval
     if (!context.latestUserMessageText) {
-        context.latestUserMessageText = await getMostRecentUserMessageText();
+        context.latestUserMessageText = await getMostRecentUserMessageText(roomId);
         if (context.latestUserMessageText) {
             logger.info('[Queue] Fallback populated latestUserMessageText from history.');
         }
@@ -328,7 +344,8 @@ async function handleRequestAIResponse(parsedMessage, user, selectedAPI, hordeKe
     // Continuation behavior: if last chat message was by a specific active AI character, force them first
     if (isManualOrContinue) {
         try {
-            let [aiData] = await db.readAIChat();
+            // Pass roomId to read room-specific chat
+            let [aiData] = await db.readAIChat(null, roomId);
             const arr = JSON.parse(aiData);
             const last = arr[arr.length - 1];
             if (last?.entity === 'AI' && last?.username) {
@@ -361,10 +378,10 @@ async function handleRequestAIResponse(parsedMessage, user, selectedAPI, hordeKe
     await startQueueProcessing(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig);
 }
 
-async function getLastUserMessageUsername() {
+async function getLastUserMessageUsername(roomId = null) {
     // Scan AIChat (entity === 'user') for last human user entry
     try {
-        let [data] = await db.readAIChat();
+        let [data] = await db.readAIChat(null, roomId);
         const arr = JSON.parse(data);
         for (let i = arr.length - 1; i >= 0; i--) {
             if (arr[i].entity === 'user' && arr[i].username && arr[i].username !== 'Unknown') return arr[i].username;
@@ -375,10 +392,10 @@ async function getLastUserMessageUsername() {
     return null;
 }
 
-async function getMostRecentUserMessageText() {
+async function getMostRecentUserMessageText(roomId = null) {
     // Try AIChat first (since AI triggers rely on that chain), then userChat
     try {
-        let [aiData] = await db.readAIChat();
+        let [aiData] = await db.readAIChat(null, roomId);
         const arr = JSON.parse(aiData);
         for (let i = arr.length - 1; i >= 0; i--) {
             if (arr[i].entity === 'user' && arr[i].content) return (arr[i].content || '').replace(/<[^>]+>/g,'').trim();
@@ -387,6 +404,7 @@ async function getMostRecentUserMessageText() {
         logger.debug('[Queue] getMostRecentUserMessageText AIChat scan failed:', e.message);
     }
     try {
+        // TODO: pass roomId to readUserChat when room-scoped
         let [userData] = await db.readUserChat();
         const arr2 = JSON.parse(userData);
         for (let i = arr2.length - 1; i >= 0; i--) {
@@ -495,6 +513,127 @@ var hostUUID
 //default values
 
 var liveConfig, liveAPI, secretsObj, TCAPIkey, hordeKey
+
+// ============================================================================
+// ROOM STATE MANAGEMENT - Critical for message isolation
+// ============================================================================
+
+// Map roomId -> Set of WebSocket objects in that room
+const roomsState = new Map();
+
+// WeakMap ws -> roomId (track which room each connection is in)
+const wsToRoom = new WeakMap();
+
+// WeakMap ws -> userId (track which user each connection belongs to)
+const wsToUser = new WeakMap();
+
+// Map roomId -> room config object (per-room settings)
+const roomConfigs = new Map();
+
+// Import GLOBAL_ROOM_ID for fallback
+const { GLOBAL_ROOM_ID } = db;
+
+/**
+ * Get the room ID for a WebSocket connection
+ * @param {WebSocket} ws - WebSocket connection
+ * @returns {string|null} Room ID or null if not in a room
+ */
+function getWsRoom(ws) {
+    return wsToRoom.get(ws) || null;
+}
+
+/**
+ * Get the user ID for a WebSocket connection
+ * @param {WebSocket} ws - WebSocket connection
+ * @returns {string|null} User ID or null
+ */
+function getWsUser(ws) {
+    return wsToUser.get(ws) || null;
+}
+
+/**
+ * Associate a WebSocket with a room
+ * @param {WebSocket} ws - WebSocket connection
+ * @param {string} roomId - Room ID to join
+ * @param {string} userId - User ID
+ */
+function setWsRoom(ws, roomId, userId) {
+    // Remove from previous room first
+    const prevRoom = wsToRoom.get(ws);
+    if (prevRoom && roomsState.has(prevRoom)) {
+        roomsState.get(prevRoom).delete(ws);
+        if (roomsState.get(prevRoom).size === 0) {
+            // Keep empty room state for now (room persists)
+        }
+    }
+    
+    // Add to new room
+    wsToRoom.set(ws, roomId);
+    wsToUser.set(ws, userId);
+    
+    if (!roomsState.has(roomId)) {
+        roomsState.set(roomId, new Set());
+    }
+    roomsState.get(roomId).add(ws);
+    
+    logger.info(`[Room] User ${userId} joined room ${roomId}`);
+}
+
+/**
+ * Remove a WebSocket from its current room (on disconnect)
+ * @param {WebSocket} ws - WebSocket connection
+ */
+function removeWsFromRoom(ws) {
+    const roomId = wsToRoom.get(ws);
+    const userId = wsToUser.get(ws);
+    
+    if (roomId && roomsState.has(roomId)) {
+        roomsState.get(roomId).delete(ws);
+        logger.info(`[Room] User ${userId} left room ${roomId}`);
+    }
+    
+    // WeakMap entries will be garbage collected automatically
+}
+
+/**
+ * Get all WebSocket connections in a room
+ * @param {string} roomId - Room ID
+ * @returns {Set<WebSocket>} Set of WebSocket connections
+ */
+function getRoomConnections(roomId) {
+    return roomsState.get(roomId) || new Set();
+}
+
+/**
+ * Get or create room configuration
+ * @param {string} roomId - Room ID
+ * @returns {object} Room configuration
+ */
+async function getRoomConfig(roomId) {
+    if (roomConfigs.has(roomId)) {
+        return roomConfigs.get(roomId);
+    }
+    
+    // Load from database
+    const room = await db.getRoomById(roomId);
+    if (room && room.settings) {
+        roomConfigs.set(roomId, room.settings);
+        return room.settings;
+    }
+    
+    // Return empty config if room not found
+    return {};
+}
+
+/**
+ * Update room configuration
+ * @param {string} roomId - Room ID
+ * @param {object} config - New configuration
+ */
+async function setRoomConfig(roomId, config) {
+    roomConfigs.set(roomId, config);
+    await db.updateRoomSettings(roomId, { settings: config });
+}
 
 function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -776,6 +915,123 @@ export async function broadcast(message, role = 'all') {
     }
 }
 
+/**
+ * ROOM-SCOPED BROADCAST - Critical for preventing global sync contamination
+ * Send a message only to WebSocket connections in a specific room
+ * @param {string} roomId - Room ID to broadcast to
+ * @param {object} message - Message object to send
+ * @param {string} role - Optional role filter ('all', 'host', etc.)
+ * @returns {Promise<object>} Result with sentTo and totalClients
+ */
+export async function broadcastToRoom(roomId, message, role = 'all') {
+    if (!roomId) {
+        logger.error('[broadcastToRoom] CRITICAL: Called without roomId! This would cause global sync.');
+        return { sentTo: [], totalClients: 0 };
+    }
+    
+    const connections = getRoomConnections(roomId);
+    if (connections.size === 0) {
+        logger.debug(`[broadcastToRoom] No connections in room ${roomId}`);
+        return { sentTo: [], totalClients: 0 };
+    }
+    
+    const shouldReport = !unloggedMessageTypes.includes(message.type);
+    
+    if (shouldReport) {
+        logger.info(`[Room ${roomId}] Broadcasting "${message.type}" to ${connections.size} users`);
+    }
+    
+    const sentTo = [];
+    const failedTo = [];
+    
+    for (const ws of connections) {
+        if (!ws || ws.readyState !== WebSocket.OPEN) {
+            continue;
+        }
+        
+        // Role filtering if needed
+        if (role !== 'all') {
+            const userId = getWsUser(ws);
+            if (userId) {
+                try {
+                    const user = await db.getUser(userId);
+                    if (user && user.role !== role) {
+                        continue;
+                    }
+                } catch (e) {
+                    logger.debug(`[broadcastToRoom] Role check failed for user:`, e.message);
+                    continue;
+                }
+            }
+        }
+        
+        try {
+            ws.send(JSON.stringify(message));
+            const userId = getWsUser(ws);
+            sentTo.push(userId || 'unknown');
+        } catch (sendError) {
+            const userId = getWsUser(ws);
+            failedTo.push(userId || 'unknown');
+            logger.error(`[broadcastToRoom] Failed to send to user:`, sendError);
+        }
+    }
+    
+    if (shouldReport && sentTo.length > 0) {
+        logger.info(`[Room ${roomId}] Sent "${message.type}" to: ${sentTo.join(', ')}`);
+    }
+    
+    if (failedTo.length > 0) {
+        logger.warn(`[Room ${roomId}] Failed to send to: ${failedTo.join(', ')}`);
+    }
+    
+    return { sentTo, totalClients: connections.size };
+}
+
+/**
+ * Require room context middleware - validates roomId before processing
+ * Use this wrapper for message handlers that MUST be room-scoped
+ * @param {WebSocket} ws - WebSocket connection
+ * @param {object} data - Parsed message data
+ * @param {Function} handler - Async handler function(ws, data, roomId)
+ * @returns {Promise<boolean>} True if handler was executed, false if blocked
+ */
+async function requireRoom(ws, data, handler) {
+    const roomId = getWsRoom(ws);
+    
+    if (!roomId) {
+        logger.warn(`[requireRoom] Blocked message type "${data.type}" - no room context`);
+        ws.send(JSON.stringify({
+            type: 'error',
+            message: 'You must join a room before performing this action',
+            originalType: data.type
+        }));
+        return false;
+    }
+    
+    // Validate user is actually in the room
+    const userId = getWsUser(ws);
+    if (userId) {
+        const inRoom = await db.isUserInRoom(roomId, userId);
+        if (!inRoom) {
+            logger.warn(`[requireRoom] User ${userId} not in room ${roomId}`);
+            ws.send(JSON.stringify({
+                type: 'error',
+                message: 'You are not a member of this room',
+                originalType: data.type
+            }));
+            return false;
+        }
+    }
+    
+    try {
+        await handler(ws, data, roomId);
+        return true;
+    } catch (err) {
+        logger.error(`[requireRoom] Handler error:`, err);
+        return false;
+    }
+}
+
 // Broadcast the updated array of connected usernames to all clients
 //gets its own function because sent so often.
 //TODO: could probably have 'userListMessage' split into a global and just use broadcast() instead
@@ -836,14 +1092,14 @@ async function removeAnyUserChatMessage(parsedMessage) {
     }
 }
 
-async function saveAndClearChat(type) {
+async function saveAndClearChat(type, roomId = null) {
     if (type === 'AIChat') {
-        let newSessionID = await db.newSession();
-        await db.setActiveChat(newSessionID);
+        let newSessionID = await db.newSession(roomId);
+        await db.setActiveChat(newSessionID, roomId);
         return newSessionID
     }
     else if (type === 'userChat') {
-        await db.newUserChatSession();
+        await db.newUserChatSession(roomId);
     }
     else {
         logger.warn('Unknown chat type. Not saving chat history. This should never happen.');
@@ -1254,32 +1510,52 @@ async function handleConnections(ws, type, request) {
                     logger.warn('recognized startClearChatTimer message');
 
                     const { target, secondsLeft } = parsedMessage;
+                    
+                    // Capture room context for use in timer callback
+                    const timerRoomId = getWsRoom(ws);
+                    const timerKey = timerRoomId ? `${target}:${timerRoomId}` : target;
 
-                    // If there's already a timer for this target, ignore the new request
-                    if (activeClearChatTimers[target]) {
-                        logger.warn(`Timer already active for ${target}, ignoring new request.`);
+                    // If there's already a timer for this target in this room, ignore
+                    if (activeClearChatTimers[timerKey]) {
+                        logger.warn(`Timer already active for ${timerKey}, ignoring new request.`);
                         return;
                     }
 
                     const responseMessage = {
                         type: 'startClearTimerResponse',
                         target,
+                        roomId: timerRoomId
                     };
-                    await broadcast(responseMessage);
-                    logger.warn(`Broadcasted startClearTimerResponse for ${target}. Waiting ${secondsLeft}s...`);
+                    
+                    // Broadcast to room or globally
+                    if (timerRoomId) {
+                        await broadcastToRoom(timerRoomId, responseMessage);
+                    } else {
+                        await broadcast(responseMessage);
+                    }
+                    logger.warn(`Broadcasted startClearTimerResponse for ${target} in room ${timerRoomId || 'global'}. Waiting ${secondsLeft}s...`);
 
                     // Start and store the timer
-                    activeClearChatTimers[target] = setTimeout(async () => {
-                        logger.warn(`Time is up! Clearing chat for ${target}`);
-                        delete activeClearChatTimers[target]; // Clear the reference
+                    activeClearChatTimers[timerKey] = setTimeout(async () => {
+                        logger.warn(`Time is up! Clearing chat for ${target} in room ${timerRoomId || 'global'}`);
+                        delete activeClearChatTimers[timerKey];
 
                         if (target === '#AIChat') {
-                            logger.warn('Saving and clearing AIChat...');
-                            const newSessionID = await saveAndClearChat('AIChat');
-                            await broadcast({ type: 'clearAIChat', sessionID: newSessionID });
+                            logger.warn(`Saving and clearing AIChat for room ${timerRoomId || 'global'}...`);
+                            const newSessionID = await saveAndClearChat('AIChat', timerRoomId);
+                            
+                            // Broadcast clear to room or globally
+                            const clearMsg = { type: 'clearAIChat', sessionID: newSessionID, roomId: timerRoomId };
+                            if (timerRoomId) {
+                                await broadcastToRoom(timerRoomId, clearMsg);
+                            } else {
+                                await broadcast(clearMsg);
+                            }
 
+                            // Get room config for characters (if in room) or global config
+                            const configToUse = timerRoomId ? await getRoomConfig(timerRoomId) : liveConfig.promptConfig;
                             migrateSelectedCharactersIfNeeded(liveConfig);
-                            const scArr = (liveConfig.promptConfig.selectedCharacters || [])
+                            const scArr = (configToUse.selectedCharacters || liveConfig.promptConfig.selectedCharacters || [])
                                 .filter(c => c.value && c.value !== 'None' && !c.isMuted);
                             if (scArr.length === 0) {
                                 logger.warn('[ClearAIChat] No active characters to seed first messages.');
@@ -1294,12 +1570,12 @@ async function handleConnections(ws, type, request) {
                                     const firstMesRaw = cardJSON.first_mes || '';
                                     const firstMes = api.replaceMacros(firstMesRaw, thisUserUsername, charName);
 
-                                    // Persist message (DB assigns timestamp & message_id)
-                                    await db.writeAIChatMessage(charName, charName, firstMes, 'AI');
+                                    // Persist message with room context
+                                    await db.writeAIChatMessage(charName, charName, firstMes, 'AI', timerRoomId);
 
-                                    // Query just-inserted row (fast lookup)
+                                    // Query just-inserted row
                                     const dbRow = await (async () => {
-                                        const [rowsJSON] = await db.readAIChat(newSessionID); // returns [json, sessionID]
+                                        const [rowsJSON] = await db.readAIChat(newSessionID, timerRoomId);
                                         const rows = JSON.parse(rowsJSON);
                                         return rows[rows.length - 1];
                                     })();
@@ -1314,9 +1590,15 @@ async function handleConnections(ws, type, request) {
                                         entity: 'AI',
                                         timestamp: dbRow?.timestamp || new Date().toISOString(),
                                         AIChatUserList: [{ username: charName, color: 'white', entity: 'AI', role: 'AI' }],
+                                        roomId: timerRoomId
                                     };
-                                    await broadcast(outMessage);
-                                    logger.warn(`[ClearAIChat] Seeded first message for ${charName} (session ${outMessage.sessionID}, messageID ${outMessage.messageID})`);
+                                    
+                                    if (timerRoomId) {
+                                        await broadcastToRoom(timerRoomId, outMessage);
+                                    } else {
+                                        await broadcast(outMessage);
+                                    }
+                                    logger.warn(`[ClearAIChat] Seeded first message for ${charName} in room ${timerRoomId || 'global'}`);
                                 } catch (seedErr) {
                                     logger.error('[ClearAIChat] Error seeding first message for character slot:', charEntry, seedErr);
                                 }
@@ -1324,9 +1606,14 @@ async function handleConnections(ws, type, request) {
                         }
 
                         if (target === '#userChat') {
-                            logger.warn('Saving and clearing userChat...');
-                            await saveAndClearChat('userChat');
-                            await broadcast({ type: 'clearChat' });
+                            logger.warn(`Saving and clearing userChat for room ${timerRoomId || 'global'}...`);
+                            await saveAndClearChat('userChat', timerRoomId);
+                            const clearMsg = { type: 'clearChat', roomId: timerRoomId };
+                            if (timerRoomId) {
+                                await broadcastToRoom(timerRoomId, clearMsg);
+                            } else {
+                                await broadcast(clearMsg);
+                            }
                         }
 
                     }, secondsLeft * 1000);
@@ -1359,26 +1646,44 @@ async function handleConnections(ws, type, request) {
                     return
                 }
                 else if (parsedMessage.type === 'changeCharacterRequest') {
+                    const currentRoomId = getWsRoom(ws);
                     const changeCharMessage = {
                         type: 'changeCharacter',
                         char: parsedMessage.newChar,
-                        charDisplayName: parsedMessage.newCharDisplayName
+                        charDisplayName: parsedMessage.newCharDisplayName,
+                        roomId: currentRoomId
                     }
 
-                    liveConfig.promptConfig.selectedCharacter = parsedMessage.newChar
-                    liveConfig.promptConfig.selectedCharacterDisplayName = parsedMessage.newCharDisplayName
-                    await fio.writeConfig(liveConfig)
-                    await db.upsertChar(parsedMessage.newChar, parsedMessage.newCharDisplayName, user.color)
-                    await broadcast(changeCharMessage, 'host');
-
-                    //this is necessary even though broadcast is wrapped in a promise..
-                    await new Promise((resolve) => setTimeout(resolve, 0));
-
-                    //send reduced message with displayname only to guests
-                    delete changeCharMessage.char
-                    changeCharMessage.type = 'changeCharacterDisplayName'
-                    await broadcast(changeCharMessage, 'guest');
-                    return
+                    // Store character in room config, not global
+                    if (currentRoomId) {
+                        const roomConfig = await getRoomConfig(currentRoomId);
+                        roomConfig.selectedCharacter = parsedMessage.newChar;
+                        roomConfig.selectedCharacterDisplayName = parsedMessage.newCharDisplayName;
+                        await setRoomConfig(currentRoomId, roomConfig);
+                    } else {
+                        // Fallback to global for backward compatibility
+                        liveConfig.promptConfig.selectedCharacter = parsedMessage.newChar;
+                        liveConfig.promptConfig.selectedCharacterDisplayName = parsedMessage.newCharDisplayName;
+                        await fio.writeConfig(liveConfig);
+                    }
+                    
+                    await db.upsertChar(parsedMessage.newChar, parsedMessage.newCharDisplayName, user.color);
+                    
+                    // Broadcast to room or globally
+                    if (currentRoomId) {
+                        await broadcastToRoom(currentRoomId, changeCharMessage, 'host');
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                        delete changeCharMessage.char;
+                        changeCharMessage.type = 'changeCharacterDisplayName';
+                        await broadcastToRoom(currentRoomId, changeCharMessage, 'guest');
+                    } else {
+                        await broadcast(changeCharMessage, 'host');
+                        await new Promise((resolve) => setTimeout(resolve, 0));
+                        delete changeCharMessage.char;
+                        changeCharMessage.type = 'changeCharacterDisplayName';
+                        await broadcast(changeCharMessage, 'guest');
+                    }
+                    return;
                 }
                 else if (parsedMessage.type === 'displayCharDefs') {
                     const charDefs = await fio.charaRead(parsedMessage.value)
@@ -1576,39 +1881,92 @@ async function handleConnections(ws, type, request) {
                     return
                 }
                 else if (parsedMessage.type === 'pastChatsRequest') {
-                    const pastChats = await db.getPastChats()
+                    // Get room context for filtering past chats
+                    const currentRoomId = getWsRoom(ws);
+                    logger.info(`[pastChatsRequest] Room context: ${currentRoomId || 'NONE (global)'}`);
+                    
+                    const pastChats = await db.getPastChats('ai', currentRoomId);
+                    logger.info(`[pastChatsRequest] Found ${Object.keys(pastChats).length} past chats for room ${currentRoomId || 'global'}`);
+                    
                     const pastChatsListMessage = {
                         type: 'pastChatsList',
-                        pastChats: pastChats
+                        pastChats: pastChats,
+                        roomId: currentRoomId
                     }
-                    await broadcast(pastChatsListMessage, 'host')
+                    // Only send to requesting user (or room members if host)
+                    if (currentRoomId) {
+                        await broadcastToRoom(currentRoomId, pastChatsListMessage, 'host');
+                    } else {
+                        await broadcast(pastChatsListMessage, 'host');
+                    }
                     return
                 }
                 else if (parsedMessage.type === 'loadPastChat') {
-                    const [pastChat, sessionID] = await db.readAIChat(parsedMessage.session)
-                    await db.setActiveChat(sessionID)
-                    let jsonArray = JSON.parse(pastChat)
+                    const currentRoomId = getWsRoom(ws);
+                    const requestedSessionId = parsedMessage.session;
+                    
+                    // Validate session belongs to current room (prevent cross-room access)
+                    const sessionInfo = await db.getSessionRoom(requestedSessionId);
+                    if (currentRoomId && sessionInfo && sessionInfo.room_id !== currentRoomId) {
+                        logger.warn(`[loadPastChat] User tried to load session ${requestedSessionId} from different room`);
+                        ws.send(JSON.stringify({
+                            type: 'roomError',
+                            message: 'Cannot load chat from a different room',
+                            action: 'loadPastChat'
+                        }));
+                        return;
+                    }
+                    
+                    const [pastChat, sessionID] = await db.readAIChat(requestedSessionId, currentRoomId);
+                    await db.setActiveChat(sessionID, currentRoomId);
+                    let jsonArray = JSON.parse(pastChat);
                     const pastChatsLoadMessage = {
                         type: 'pastChatToLoad',
                         pastChatHistory: markdownifyChatHistoriesArray(jsonArray),
-                        sessionID: sessionID
+                        sessionID: sessionID,
+                        roomId: currentRoomId
+                    };
+                    // Broadcast only to room members
+                    if (currentRoomId) {
+                        await broadcastToRoom(currentRoomId, pastChatsLoadMessage);
+                    } else {
+                        await broadcast(pastChatsLoadMessage);
                     }
-                    await broadcast(pastChatsLoadMessage)
-                    return
+                    return;
                 }
                 else if (parsedMessage.type === 'pastChatDelete') {
-                    const sessionID = parsedMessage.sessionID
-                    let [result, wasActive] = await db.deletePastChat(sessionID)
-                    logger.debug('Past Chat Deletion: ', result, wasActive)
+                    const currentRoomId = getWsRoom(ws);
+                    const sessionID = parsedMessage.sessionID;
+                    
+                    // Validate session belongs to current room
+                    const sessionInfo = await db.getSessionRoom(sessionID);
+                    if (currentRoomId && sessionInfo && sessionInfo.room_id !== currentRoomId) {
+                        logger.warn(`[pastChatDelete] User tried to delete session ${sessionID} from different room`);
+                        ws.send(JSON.stringify({
+                            type: 'roomError',
+                            message: 'Cannot delete chat from a different room',
+                            action: 'pastChatDelete'
+                        }));
+                        return;
+                    }
+                    
+                    let [result, wasActive] = await db.deletePastChat(sessionID);
+                    logger.debug('Past Chat Deletion: ', result, wasActive);
                     if (result === 'ok') {
                         const pastChatsDeleteConfirmation = {
                             type: 'pastChatDeleted',
-                            wasActive: wasActive
+                            wasActive: wasActive,
+                            roomId: currentRoomId
+                        };
+                        // Broadcast only to room
+                        if (currentRoomId) {
+                            await broadcastToRoom(currentRoomId, pastChatsDeleteConfirmation, 'host');
+                        } else {
+                            await broadcast(pastChatsDeleteConfirmation, 'host');
                         }
-                        await broadcast(pastChatsDeleteConfirmation, 'host')
-                        return
+                        return;
                     } else {
-                        return
+                        return;
                     }
                 }
                 //MARK: message Delete
@@ -1798,6 +2156,370 @@ async function handleConnections(ws, type, request) {
             //MARK: Universal WS Msgs
             
             // ================================
+            // ROOM MANAGEMENT HANDLERS - Critical for message isolation
+            // ================================
+            
+            if (parsedMessage.type === 'listRooms') {
+                const rooms = await db.getAllActiveRooms();
+                ws.send(JSON.stringify({
+                    type: 'roomsList',
+                    rooms: rooms.map(r => ({
+                        room_id: r.room_id,
+                        name: r.name,
+                        description: r.description,
+                        member_count: r.member_count,
+                        member_names: r.member_names,
+                        created_at: r.created_at
+                    }))
+                }));
+                return;
+            }
+            
+            else if (parsedMessage.type === 'createRoom') {
+                const { name, description } = parsedMessage;
+                
+                if (!name || name.trim().length === 0) {
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'Room name is required',
+                        action: 'createRoom'
+                    }));
+                    return;
+                }
+                
+                if (name.length > 50) {
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'Room name must be 50 characters or less',
+                        action: 'createRoom'
+                    }));
+                    return;
+                }
+                
+                try {
+                    const room = await db.createRoom(
+                        name.trim(),
+                        description || '',
+                        uuid,
+                        {} // Initial settings (empty, uses global defaults)
+                    );
+                    
+                    // Associate this WebSocket with the new room
+                    setWsRoom(ws, room.room_id, uuid);
+                    
+                    // Get room's active session for chat history
+                    const sessionId = await db.getRoomActiveSession(room.room_id, 'ai');
+                    
+                    ws.send(JSON.stringify({
+                        type: 'roomCreated',
+                        room: room,
+                        sessionId: sessionId
+                    }));
+                    
+                    // Broadcast updated room list to everyone
+                    const rooms = await db.getAllActiveRooms();
+                    broadcast({
+                        type: 'roomsList',
+                        rooms: rooms.map(r => ({
+                            room_id: r.room_id,
+                            name: r.name,
+                            description: r.description,
+                            member_count: r.member_count,
+                            member_names: r.member_names,
+                            created_at: r.created_at
+                        }))
+                    });
+                    
+                    logger.info(`[Room] User ${clientsObject[uuid]?.username || uuid} created room "${name}"`);
+                } catch (err) {
+                    logger.error('[createRoom] Error:', err);
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'Failed to create room',
+                        action: 'createRoom'
+                    }));
+                }
+                return;
+            }
+            
+            else if (parsedMessage.type === 'joinRoom') {
+                const { roomId } = parsedMessage;
+                
+                if (!roomId) {
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'Room ID is required',
+                        action: 'joinRoom'
+                    }));
+                    return;
+                }
+                
+                try {
+                    // Check room exists
+                    const room = await db.getRoomById(roomId);
+                    if (!room) {
+                        ws.send(JSON.stringify({
+                            type: 'roomError',
+                            message: 'Room not found',
+                            action: 'joinRoom'
+                        }));
+                        return;
+                    }
+                    
+                    // Leave current room if in one
+                    const currentRoom = getWsRoom(ws);
+                    if (currentRoom) {
+                        await db.removeRoomMember(currentRoom, uuid);
+                        removeWsFromRoom(ws);
+                        
+                        // Notify old room members
+                        broadcastToRoom(currentRoom, {
+                            type: 'memberLeft',
+                            userId: uuid,
+                            username: thisUserUsername
+                        });
+                    }
+                    
+                    // Add to new room
+                    await db.addRoomMember(roomId, uuid, 'member');
+                    setWsRoom(ws, roomId, uuid);
+                    
+                    // Get room members
+                    const members = await db.getRoomMembers(roomId);
+                    
+                    // Get room's chat history
+                    const sessionId = await db.getRoomActiveSession(roomId, 'ai');
+                    let chatHistory = [];
+                    if (sessionId) {
+                        const [chatData] = await db.readAIChat(sessionId);
+                        chatHistory = JSON.parse(chatData || '[]');
+                    }
+                    
+                    // Get room's user chat history
+                    // TODO: Add room-scoped user chat reading
+                    
+                    // Get room config
+                    const roomConfig = await getRoomConfig(roomId);
+                    
+                    ws.send(JSON.stringify({
+                        type: 'roomJoined',
+                        room: {
+                            room_id: room.room_id,
+                            name: room.name,
+                            description: room.description,
+                            settings: room.settings || {}
+                        },
+                        members: members.map(m => ({
+                            user_id: m.user_id,
+                            username: m.username,
+                            username_color: m.username_color,
+                            role: m.role
+                        })),
+                        chatHistory: markdownifyChatHistoriesArray(chatHistory),
+                        sessionId: sessionId,
+                        config: roomConfig
+                    }));
+                    
+                    // Notify other room members
+                    broadcastToRoom(roomId, {
+                        type: 'memberJoined',
+                        userId: uuid,
+                        username: thisUserUsername,
+                        userColor: await db.getUserColor(uuid)
+                    });
+                    
+                    // Update room list for everyone
+                    const rooms = await db.getAllActiveRooms();
+                    broadcast({
+                        type: 'roomsList',
+                        rooms: rooms.map(r => ({
+                            room_id: r.room_id,
+                            name: r.name,
+                            description: r.description,
+                            member_count: r.member_count,
+                            member_names: r.member_names,
+                            created_at: r.created_at
+                        }))
+                    });
+                    
+                    logger.info(`[Room] User ${thisUserUsername} joined room "${room.name}"`);
+                } catch (err) {
+                    logger.error('[joinRoom] Error:', err);
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'Failed to join room',
+                        action: 'joinRoom'
+                    }));
+                }
+                return;
+            }
+            
+            else if (parsedMessage.type === 'leaveRoom') {
+                const currentRoom = getWsRoom(ws);
+                
+                if (!currentRoom) {
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'Not currently in a room',
+                        action: 'leaveRoom'
+                    }));
+                    return;
+                }
+                
+                try {
+                    // Leave the room
+                    await db.removeRoomMember(currentRoom, uuid);
+                    removeWsFromRoom(ws);
+                    
+                    ws.send(JSON.stringify({
+                        type: 'roomLeft',
+                        roomId: currentRoom
+                    }));
+                    
+                    // Notify remaining room members
+                    broadcastToRoom(currentRoom, {
+                        type: 'memberLeft',
+                        userId: uuid,
+                        username: thisUserUsername
+                    });
+                    
+                    // Update room list for everyone
+                    const rooms = await db.getAllActiveRooms();
+                    broadcast({
+                        type: 'roomsList',
+                        rooms: rooms.map(r => ({
+                            room_id: r.room_id,
+                            name: r.name,
+                            description: r.description,
+                            member_count: r.member_count,
+                            member_names: r.member_names,
+                            created_at: r.created_at
+                        }))
+                    });
+                    
+                    logger.info(`[Room] User ${thisUserUsername} left room ${currentRoom}`);
+                } catch (err) {
+                    logger.error('[leaveRoom] Error:', err);
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'Failed to leave room',
+                        action: 'leaveRoom'
+                    }));
+                }
+                return;
+            }
+            
+            else if (parsedMessage.type === 'roomSettingsUpdate') {
+                const { settings } = parsedMessage;
+                const currentRoom = getWsRoom(ws);
+                
+                if (!currentRoom) {
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'Not currently in a room',
+                        action: 'roomSettingsUpdate'
+                    }));
+                    return;
+                }
+                
+                try {
+                    // Check user has permission (creator or moderator)
+                    const role = await db.getUserRoomRole(currentRoom, uuid);
+                    if (role !== 'creator' && role !== 'moderator' && thisUserRole !== 'host') {
+                        ws.send(JSON.stringify({
+                            type: 'roomError',
+                            message: 'You do not have permission to update room settings',
+                            action: 'roomSettingsUpdate'
+                        }));
+                        return;
+                    }
+                    
+                    await setRoomConfig(currentRoom, settings);
+                    
+                    // Broadcast to all room members
+                    broadcastToRoom(currentRoom, {
+                        type: 'roomSettingsChanged',
+                        settings: settings
+                    });
+                    
+                    logger.info(`[Room] Settings updated for room ${currentRoom} by ${thisUserUsername}`);
+                } catch (err) {
+                    logger.error('[roomSettingsUpdate] Error:', err);
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'Failed to update room settings',
+                        action: 'roomSettingsUpdate'
+                    }));
+                }
+                return;
+            }
+            
+            else if (parsedMessage.type === 'deleteRoom') {
+                const { roomId } = parsedMessage;
+                const targetRoom = roomId || getWsRoom(ws);
+                
+                if (!targetRoom) {
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'No room specified',
+                        action: 'deleteRoom'
+                    }));
+                    return;
+                }
+                
+                try {
+                    // Check user has permission (creator only, or host)
+                    const role = await db.getUserRoomRole(targetRoom, uuid);
+                    if (role !== 'creator' && thisUserRole !== 'host') {
+                        ws.send(JSON.stringify({
+                            type: 'roomError',
+                            message: 'Only the room creator can delete a room',
+                            action: 'deleteRoom'
+                        }));
+                        return;
+                    }
+                    
+                    // Notify all room members before deletion
+                    broadcastToRoom(targetRoom, {
+                        type: 'roomDeleted',
+                        roomId: targetRoom,
+                        message: 'This room has been deleted'
+                    });
+                    
+                    // Soft delete the room
+                    await db.deleteRoom(targetRoom);
+                    
+                    // Clear room state
+                    roomsState.delete(targetRoom);
+                    roomConfigs.delete(targetRoom);
+                    
+                    // Update room list for everyone
+                    const rooms = await db.getAllActiveRooms();
+                    broadcast({
+                        type: 'roomsList',
+                        rooms: rooms.map(r => ({
+                            room_id: r.room_id,
+                            name: r.name,
+                            description: r.description,
+                            member_count: r.member_count,
+                            member_names: r.member_names,
+                            created_at: r.created_at
+                        }))
+                    });
+                    
+                    logger.info(`[Room] Room ${targetRoom} deleted by ${thisUserUsername}`);
+                } catch (err) {
+                    logger.error('[deleteRoom] Error:', err);
+                    ws.send(JSON.stringify({
+                        type: 'roomError',
+                        message: 'Failed to delete room',
+                        action: 'deleteRoom'
+                    }));
+                }
+                return;
+            }
+            
+            // ================================
             // USER AUTHENTICATION HANDLERS
             // ================================
             
@@ -1982,6 +2704,9 @@ async function handleConnections(ws, type, request) {
                 const senderUUID = parsedMessage.UUID
                 const canPost = liveConfig.crowdControl.guestInputPermissionState;
                 var userPrompt
+                
+                // Get room context for message isolation
+                const currentRoomId = getWsRoom(ws);
 
                 if (!canPost && thisUserRole !== 'host') {
                     //get their username from the clientsObject
@@ -2001,7 +2726,7 @@ async function handleConnections(ws, type, request) {
                     if (userTryingToContinue) {
                         logger.info('User is trying to continue the AI response...');
                     }
-                    let [currentChat, sessionID] = await db.readAIChat()
+                    let [currentChat, sessionID] = await db.readAIChat(null, currentRoomId)
                     let messageHistory = JSON.parse(currentChat)
                     let lastMessageEntity = messageHistory[messageHistory.length - 1]?.entity || 'Unknown' //in the case of message sent in empty chat
                     let shouldContinue = userTryingToContinue && lastMessageEntity === 'AI' ? true : false
@@ -2010,8 +2735,9 @@ async function handleConnections(ws, type, request) {
                     //the character's firstMessage into the new chat session.
                     if (!shouldContinue && userInput && userInput.length > 0) {
                         userInput = userInput.slice(0, 1000); //force respect the message size limit
-                        await db.writeAIChatMessage(username, senderUUID, userInput, 'user');
-                        let [activeChat, foundSessionID] = await db.readAIChat()
+                        // Pass roomId to writeAIChatMessage for room-scoped sessions
+                        await db.writeAIChatMessage(username, senderUUID, userInput, 'user', currentRoomId);
+                        let [activeChat, foundSessionID] = await db.readAIChat(null, currentRoomId)
                         var chatJSON = JSON.parse(activeChat)
                         var lastItem = chatJSON[chatJSON.length - 1]
                         var newMessageID = lastItem?.messageID
@@ -2029,8 +2755,16 @@ async function handleConnections(ws, type, request) {
                             entity: 'user',
                             role: thisUserRole,
                             timestamp: lastItem?.timestamp || new Date().toISOString(),
+                            roomId: currentRoomId // Include room context
                         }
-                        await broadcast(userPrompt)
+                        
+                        // CRITICAL: Use room-scoped broadcast if in a room
+                        if (currentRoomId) {
+                            await broadcastToRoom(currentRoomId, userPrompt);
+                        } else {
+                            // Fallback to global broadcast for backward compatibility
+                            await broadcast(userPrompt)
+                        }
                     }
 
                     if (
@@ -2045,7 +2779,8 @@ async function handleConnections(ws, type, request) {
                             latestUserMessageText: parsedMessage.userInput || '',
                             latestUserMessageID: userPrompt?.messageID,
                             mesID: userPrompt?.messageID,
-                            username: username // preserve user name for macro replacement
+                            username: username, // preserve user name for macro replacement
+                            roomId: currentRoomId // Include room context for AI response
                         };
                         await handleRequestAIResponse(aiTriggerMsg, user, selectedAPI, hordeKey, engineMode, liveConfig, ws);
                     }
@@ -2053,6 +2788,7 @@ async function handleConnections(ws, type, request) {
                 //read the current userChat file
                 if (chatID === 'userChat') {
                     parsedMessage.content = parsedMessage.content.slice(0, 1000); //force respect the message size limit
+                    // TODO: Pass roomId to writeUserChatMessage when room-scoped sessions are ready
                     await db.writeUserChatMessage(uuid, parsedMessage.content)
                     let [newdata, sessionID] = await db.readUserChat()
                     let newJsonArray = JSON.parse(newdata);
@@ -2071,9 +2807,17 @@ async function handleConnections(ws, type, request) {
                         role: thisUserRole,
                         entity: 'user',
                         timestamp: lastItem?.timestamp || new Date().toISOString(),
+                        roomId: currentRoomId // Include room context
                     }
                     //logger.info(newUserChatMessage)
-                    await broadcast(newUserChatMessage)
+                    
+                    // CRITICAL: Use room-scoped broadcast if in a room
+                    if (currentRoomId) {
+                        await broadcastToRoom(currentRoomId, newUserChatMessage);
+                    } else {
+                        // Fallback to global broadcast for backward compatibility
+                        await broadcast(newUserChatMessage)
+                    }
                 }
 
             } else {
@@ -2098,6 +2842,27 @@ async function handleConnections(ws, type, request) {
         delete clientsObject[uuid];
         updateConnectedUsers();
         await broadcastUserList();
+
+        // Room cleanup - remove user from any room they're in
+        const roomId = getWsRoom(ws);
+        if (roomId) {
+            try {
+                await db.removeRoomMember(roomId, uuid);
+                removeWsFromRoom(ws);
+                
+                // Notify remaining room members
+                broadcastToRoom(roomId, {
+                    type: 'memberLeft',
+                    userId: uuid,
+                    username: clientsObject[uuid]?.username || 'Unknown',
+                    reason: 'disconnect'
+                });
+                
+                logger.info(`[Room] User ${uuid} auto-left room ${roomId} on disconnect`);
+            } catch (err) {
+                logger.error('[Room] Error during disconnect cleanup:', err);
+            }
+        }
 
         // Decrement IP connection count
         const updatedConnections = (ipConnectionMap.get(clientIP) || 1) - 1;

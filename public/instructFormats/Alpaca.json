@@ -1,0 +1,10 @@
+{
+    "name": "Alpaca",
+    "system_sequence": "\n### Instruction:\n",
+    "input_sequence": "\n### Input:\n",
+    "output_sequence": "\n### Response:\n",
+    "end_sequence": "",
+    "first_output_sequence": "",
+    "last_output_sequence": "",
+    "system_sequence_suffix": ""
+}

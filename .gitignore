@@ -142,6 +142,7 @@ lockfile.lock
 stmp.db-wal
 stmp.db-shm
 Implementation/*
+cloudflared.exe
 
 #Claude fragments (but keep CLAUDE.MD)
 .claude_*

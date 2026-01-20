@@ -15,7 +15,8 @@
       "Bash(taskkill:*)",
       "Bash(timeout 3 tail:*)",
       "Bash(exit 0)",
-      "Bash(robocopy:*)"
+      "Bash(robocopy:*)",
+      "Bash(git rm:*)"
     ]
   }
 }

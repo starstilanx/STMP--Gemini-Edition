@@ -237,7 +237,7 @@ async function processConfirmedConnection(parsedMessage) {
   //process universal stuff for guests
   const {
     clientUUID, role, selectedCharacterDisplayName,
-    chatHistory, AIChatHistory, userList, sessionID, AIChatSessionID, crowdControl, color
+    chatHistory, AIChatHistory, userList, sessionID, AIChatSessionID, crowdControl, color, persona
   } = parsedMessage;
 
   console.debug(crowdControl)
@@ -251,6 +251,8 @@ async function processConfirmedConnection(parsedMessage) {
 
   myUUID = myUUID === "" ? clientUUID : myUUID;
   myUserColor = color || "#ffffff"; //default to white if no color is provided, this signals a problem
+  myPersona = persona || ""; // Load persona from connection message
+  console.log('[Connection] Loaded persona:', myPersona);
   $("#AIChatUserNameHolder").css('color', myUserColor).text(myAIChatUsername);
   $("#userChatUserNameHolder").css('color', myUserColor).text(myUsername);
   localStorage.setItem("UUID", myUUID);

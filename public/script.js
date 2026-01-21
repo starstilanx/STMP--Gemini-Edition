@@ -311,7 +311,10 @@ async function processConfirmedConnection(parsedMessage) {
       $("#promptConfigTextFields").addClass('heightHasbeenSet')
     }
 
-    $("#showPastChats").trigger("click");
+    // Don't auto-load past chats on connection - let user manually click
+    // or wait until they've joined a room. Auto-triggering here causes
+    // past chats to load globally before room context is established.
+    // $("#showPastChats").trigger("click");
   } else { // is Guest
     //hide control panel and host controls for guests
     $(".guestSpacing").css('display', 'block')

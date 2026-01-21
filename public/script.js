@@ -18,6 +18,7 @@ import { initHotkeys } from "./src/hotkeys.js";
 import promptInsertionKillswitches from "./src/promptInsertionKillswitches.js";
 import lorebookUI from "./src/lorebook.js";
 import characterEditor from "./src/characterEditor.js";
+import * as lobby from "./src/lobby.js";
 
 export var username,
   isAutoResponse,
@@ -236,7 +237,7 @@ async function processConfirmedConnection(parsedMessage) {
   //process universal stuff for guests
   const {
     clientUUID, role, selectedCharacterDisplayName,
-    chatHistory, AIChatHistory, userList, sessionID, AIChatSessionID, crowdControl, color
+    chatHistory, AIChatHistory, userList, sessionID, AIChatSessionID, crowdControl, color, persona
   } = parsedMessage;
 
   console.debug(crowdControl)
@@ -250,6 +251,8 @@ async function processConfirmedConnection(parsedMessage) {
 
   myUUID = myUUID === "" ? clientUUID : myUUID;
   myUserColor = color || "#ffffff"; //default to white if no color is provided, this signals a problem
+  myPersona = persona || ""; // Load persona from connection message
+  console.log('[Connection] Loaded persona:', myPersona);
   $("#AIChatUserNameHolder").css('color', myUserColor).text(myAIChatUsername);
   $("#userChatUserNameHolder").css('color', myUserColor).text(myUsername);
   localStorage.setItem("UUID", myUUID);
@@ -308,7 +311,10 @@ async function processConfirmedConnection(parsedMessage) {
       $("#promptConfigTextFields").addClass('heightHasbeenSet')
     }
 
-    $("#showPastChats").trigger("click");
+    // Don't auto-load past chats on connection - let user manually click
+    // or wait until they've joined a room. Auto-triggering here causes
+    // past chats to load globally before room context is established.
+    // $("#showPastChats").trigger("click");
   } else { // is Guest
     //hide control panel and host controls for guests
     $(".guestSpacing").css('display', 'block')
@@ -800,6 +806,45 @@ async function connectWebSocket(username) {
         lorebookUI.handleLorebookMessage(parsedMessage);
         break;
       
+      // Room/Lobby message handlers - Critical for message isolation
+      case 'roomsList':
+        lobby.renderRoomsList(parsedMessage.rooms);
+        break;
+      case 'roomCreated':
+        lobby.handleRoomCreated(parsedMessage);
+        break;
+      case 'roomJoined':
+        lobby.handleRoomJoined(parsedMessage);
+        // Load room's chat history into UI
+        if (parsedMessage.chatHistory && parsedMessage.chatHistory.length > 0) {
+          $("#AIChat").empty();
+          appendMessages(parsedMessage.chatHistory, "#AIChat", parsedMessage.sessionId);
+          $("#AIChat").scrollTop($("#AIChat").prop("scrollHeight"));
+        }
+        break;
+      case 'roomLeft':
+        lobby.handleRoomLeft(parsedMessage);
+        // Clear chats when leaving room
+        $("#AIChat").empty();
+        $("#userChat").empty();
+        break;
+      case 'roomDeleted':
+        lobby.handleRoomDeleted(parsedMessage);
+        break;
+      case 'memberJoined':
+        lobby.handleMemberJoined({ user: parsedMessage });
+        break;
+      case 'memberLeft':
+        lobby.handleMemberLeft({ user: parsedMessage });
+        break;
+      case 'roomSettingsChanged':
+        lobby.handleRoomSettingsChanged(parsedMessage);
+        break;
+      case 'roomError':
+        console.error('[Lobby] Room error:', parsedMessage.message);
+        alert(`Room Error: ${parsedMessage.message}`);
+        break;
+      
       // User Authentication response handlers
       case 'loginResponse':
       case 'registerResponse':
@@ -932,6 +977,8 @@ async function connectWebSocket(username) {
         // Sync allowImages button visual now that liveConfig is available
         allowImagesModule.syncFromLiveConfig();
         processConfirmedConnection(parsedMessage);
+        // Show lobby after connection is confirmed so room list can be fetched
+        lobby.showLobby();
         break;
       case "hostStateChange":
         handleconfig.processLiveConfig(parsedMessage);
@@ -1686,6 +1733,9 @@ $(async function () {
   }
 
   connectWebSocket(username);
+  
+  // Initialize lobby/room system
+  lobby.initLobby();
 
   $("#reconnectButton")
     .off("click")

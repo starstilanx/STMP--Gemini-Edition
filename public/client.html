@@ -30,6 +30,81 @@
 <body class="Hcentered flexbox">
     <audio id="keepAliveAudioElement" src="cup-of-cohee.ogg" preload="auto" loop muted></audio>
 
+    <!-- Lobby Overlay - Room Selection Screen -->
+    <div id="lobbyOverlay" class="lobbyOverlay" style="display: none;">
+        <div class="lobbyContainer">
+            <div class="lobbyHeader">
+                <h2>🏠 Select a Room</h2>
+                <button id="createRoomBtn" class="lobbyButton createBtn">+ Create Room</button>
+            </div>
+            <div id="lobbyRoomList" class="lobbyRoomList">
+                <div class="lobbyEmptyState">
+                    <div class="emptyIcon">🏠</div>
+                    <div>No rooms yet</div>
+                    <small class="mutedColor">Create the first room to get started!</small>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Room Dialog -->
+    <div id="createRoomDialog" class="roomDialog" style="display: none;">
+        <div class="roomDialogContent">
+            <h3>Create a New Room</h3>
+            <div class="dialogField">
+                <label for="newRoomName">Room Name</label>
+                <input type="text" id="newRoomName" maxlength="50" placeholder="Enter room name...">
+            </div>
+            <div class="dialogField">
+                <label for="newRoomDescription">Description (optional)</label>
+                <textarea id="newRoomDescription" maxlength="200" placeholder="Enter a brief description..."></textarea>
+            </div>
+            <div class="dialogButtons">
+                <button id="cancelCreateRoom" class="dialogBtn cancelBtn">Cancel</button>
+                <button id="confirmCreateRoom" class="dialogBtn confirmBtn">Create Room</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Room Settings Dialog -->
+    <div id="roomSettingsDialog" class="roomDialog" style="display: none;">
+        <div class="roomDialogContent">
+            <h3>Room Settings</h3>
+            <div class="dialogField">
+                <label for="roomSettingsName">Room Name</label>
+                <input type="text" id="roomSettingsName" maxlength="50">
+            </div>
+            <div class="dialogField">
+                <label for="roomSettingsDescription">Description</label>
+                <textarea id="roomSettingsDescription" maxlength="200"></textarea>
+            </div>
+            <div class="dialogField">
+                <label for="roomCharacterSelect">Room Character</label>
+                <select id="roomCharacterSelect">
+                    <option value="">Use server default</option>
+                </select>
+            </div>
+            <div class="dialogButtons">
+                <button id="deleteRoomBtn" class="dialogBtn deleteBtn">🗑️ Delete Room</button>
+                <button id="cancelRoomSettings" class="dialogBtn cancelBtn">Cancel</button>
+                <button id="saveRoomSettings" class="dialogBtn confirmBtn">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Current Room Header (shown when in a room) -->
+    <div id="currentRoomHeader" class="currentRoomHeader" style="display: none;">
+        <div class="roomHeaderInfo">
+            <span id="currentRoomName" class="roomName">🏠 Room Name</span>
+            <span id="currentRoomMemberCount" class="memberCount">(0 members)</span>
+        </div>
+        <div id="roomMembersList" class="roomMembersList"></div>
+        <div class="roomHeaderButtons">
+            <button id="roomSettingsBtn" class="roomHeaderBtn" title="Room Settings">⚙️</button>
+            <button id="leaveRoomBtn" class="roomHeaderBtn" title="Leave Room">🚪</button>
+        </div>
+    </div>
+
 
     <div id="appWrap" class="flexbox noGap Hcentered Vcentered alignContentCenter justifySpaceBetween">
         <div id="controlPanel" class="hostControls initialState padding5 flexbox flexFlowCol overflowYHidden transition250 opacityZero ">

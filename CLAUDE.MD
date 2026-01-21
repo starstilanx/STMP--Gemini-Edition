@@ -3,7 +3,7 @@
 > **Purpose**: This document provides comprehensive technical documentation for AI assistants (particularly Claude Code) working with the SillyTavern MultiPlayer codebase.
 
 **Version**: 1.0.2
-**Branch**: dreamy-poitras (Gemini Edition)
+**Branch**: experimental-Verinax (Gemini Edition)
 **Original Creator**: RossAscends
 
 ---

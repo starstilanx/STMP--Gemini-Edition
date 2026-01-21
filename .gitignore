@@ -137,13 +137,12 @@ dist
 secrets.json
 public/characters/
 public/chats/
-public/api-presets/*
-public/instructFormats/
-cloudflared.exe
 config.json
 lockfile.lock
 stmp.db-wal
 stmp.db-shm
+Implementation/*
+cloudflared.exe
 
 #Claude fragments (but keep CLAUDE.MD)
 .claude_*

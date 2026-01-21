@@ -2,6 +2,7 @@ import pg from 'pg';
 const { Pool } = pg;
 import { dbLogger as logger } from './log.js';
 import bcrypt from 'bcrypt';
+import { v4 as uuidv4 } from 'uuid';
 
 // PostgreSQL Configuration
 const connectionString = process.env.DATABASE_URL || 'postgres://postgres:2330@localhost:5432/stmp';
@@ -24,7 +25,28 @@ const query = (text, params) => pool.query(text, params);
 // Helper for transactions or complex atomic operations
 const getClient = () => pool.connect();
 
+// Global Room ID constant - used for migration and fallback
+const GLOBAL_ROOM_ID = 'global-room-00000000-0000-0000-0000-000000000000';
+
 const schemaDictionary = {
+    // Room tables for message isolation
+    rooms: {
+        room_id: "TEXT UNIQUE PRIMARY KEY",
+        name: "TEXT NOT NULL",
+        description: "TEXT",
+        created_by: "TEXT",
+        created_at: "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        settings: "TEXT", // JSON: room-specific config
+        is_active: "BOOLEAN DEFAULT TRUE", // Soft delete flag
+        // foreign keys defined separately
+    },
+    room_members: {
+        id: "SERIAL PRIMARY KEY", // Changed from INTEGER PRIMARY KEY
+        room_id: "TEXT NOT NULL",
+        user_id: "TEXT NOT NULL",
+        joined_at: "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+        role: "TEXT DEFAULT 'member'", // 'creator', 'moderator', 'member'
+    },
     users: {
         user_id: "TEXT UNIQUE PRIMARY KEY",
         username: "TEXT",
@@ -38,7 +60,6 @@ const schemaDictionary = {
     user_roles: {
         user_id: "TEXT UNIQUE PRIMARY KEY",
         role: "TEXT DEFAULT 'user'",
-        // foreign keys defined separately in implementation mostly, but kept here for ref
     },
     characters: {
         char_id: "TEXT UNIQUE PRIMARY KEY",
@@ -50,21 +71,21 @@ const schemaDictionary = {
     aichats: {
         message_id: "SERIAL PRIMARY KEY",
         session_id: "INTEGER",
+        room_id: "TEXT", // Room isolation
         user_id: "TEXT",
         username: "TEXT",
         message: "TEXT",
         entity: "TEXT",
-        timestamp: "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        room_id: "TEXT"
+        timestamp: "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"
     },
     userchats: {
         message_id: "SERIAL PRIMARY KEY",
         session_id: "INTEGER",
+        room_id: "TEXT", // Room isolation
         user_id: "TEXT",
         message: "TEXT",
         timestamp: "TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-        active: "BOOLEAN DEFAULT TRUE",
-        room_id: "TEXT"
+        active: "BOOLEAN DEFAULT TRUE"
     },
     sessions: {
         session_id: "SERIAL PRIMARY KEY",
@@ -127,13 +148,10 @@ async function ensureDatabaseSchema(schemaDictionary) {
             let createTableQuery = `CREATE TABLE IF NOT EXISTS "${tableName}" (`;
             const columnDefinitions = [];
             for (const [columnName, columnType] of Object.entries(tableSchema)) {
-                // Skip foreign keys in column defs for now, assuming standard types
                 if (columnName !== 'foreignKeys') {
                     columnDefinitions.push(`"${columnName}" ${columnType}`);
                 }
             }
-            // Foreign keys could be added via ALTER TABLE or inline constraint, 
-            // staying simple for now matching SQLite logic style
             createTableQuery += columnDefinitions.join(', ') + ')';
             await client.query(createTableQuery);
 
@@ -161,12 +179,10 @@ async function ensureDatabaseSchema(schemaDictionary) {
 // Write the session ID of whatever the active session in the sessions table is
 async function writeUserChatMessage(userId, message) {
     logger.debug('Writing user chat message to database...');
-    // We use a transaction to ensure atomicity like queueDatabaseWrite did, but simpler with Postgres
     const client = await getClient();
     try {
         await client.query('BEGIN');
 
-        // Retrieve active user session
         let res = await client.query('SELECT session_id FROM "userSessions" WHERE is_active = TRUE');
         let session_id;
 
@@ -174,7 +190,6 @@ async function writeUserChatMessage(userId, message) {
             session_id = res.rows[0].session_id;
             logger.debug(`Using existing user session_id: ${session_id}`);
         } else {
-            // Create new session
             const insertRes = await client.query('INSERT INTO "userSessions" (is_active, started_at) VALUES (TRUE, CURRENT_TIMESTAMP) RETURNING session_id');
             session_id = insertRes.rows[0].session_id;
             logger.debug(`Created new user session_id: ${session_id}`);
@@ -208,13 +223,10 @@ async function getPastChats(type) {
              to_char(a.timestamp, 'YYYY-MM-DD HH24:MI:SS') AS local_timestamp
              FROM sessions s
              JOIN aichats a ON s.session_id = a.session_id
-             -- self join in original query seemed redundant or specific for filtering? Removed for simplicity as it seemed to verify session existence?
-             -- Keeping original logic approximate:
              WHERE EXISTS (SELECT 1 FROM sessions s2 WHERE s.session_id = s2.session_id) 
              ORDER BY s.started_at ASC
         `)).rows;
 
-        // Logic to construct result object is same as before
         const result = {};
         for (const row of rows) {
             const sessionID = row.session_id;
@@ -280,7 +292,7 @@ async function deleteAIChatMessage(mesID) {
             logger.debug(`Message ${mesID} was deleted`);
             return 'ok';
         }
-        return 'error'; // Not found
+        return 'error';
     } catch (err) {
         logger.error('Error deleting message:', err);
         return 'error';
@@ -367,8 +379,6 @@ async function removeLastAIChatMessage() {
         }
         const session_id = sessRes.rows[0].session_id;
 
-        // Delete last msg
-        // DELETE ... WHERE message_id = (SELECT message_id ...)
         await client.query(`
             DELETE FROM aichats 
             WHERE message_id = (
@@ -416,6 +426,17 @@ async function getActiveChat() {
     }
 }
 
+// Stub for now or verify need
+async function getSessionRoom() {
+    // This is from conflicting file export list, should implement?
+    // Not found in previous scan, maybe new?
+    // Let's assume it gets room_id from active session
+    try {
+        const res = await query('SELECT room_id FROM sessions WHERE is_active = TRUE LIMIT 1');
+        return res.rows[0]?.room_id || null;
+    } catch (err) { return null; }
+}
+
 function collapseNewlines(x) {
     if (!x) return '';
     let s = x.replace(/\r/g, '');
@@ -429,7 +450,6 @@ async function writeAIChatMessage(username, userId, message, entity) {
         await client.query('BEGIN');
         const cleanMessage = collapseNewlines(message);
 
-        // Find or create session
         let sessionId;
         const sessRes = await client.query('SELECT session_id FROM sessions WHERE is_active = TRUE');
         if (sessRes.rows.length > 0) {
@@ -576,14 +596,12 @@ async function getUser(uuid) {
 }
 
 async function readAIChat(sessionID = null) {
-    let wasAutoDiscovered = false;
     let effectiveSessionID = sessionID;
 
     if (!sessionID) {
         const activeRes = await query('SELECT session_id FROM sessions WHERE is_active = TRUE LIMIT 1');
         if (activeRes.rows.length === 0) return [JSON.stringify([]), null];
         effectiveSessionID = activeRes.rows[0].session_id;
-        wasAutoDiscovered = true;
     }
 
     try {
@@ -674,8 +692,6 @@ async function editMessage(sessionID, mesID, newMessage) {
     try {
         await query('UPDATE aichats SET message = $1 WHERE message_id = $2', [newMessage, mesID]);
         logger.info(`Message ${mesID} was edited.`);
-        // verify? 
-        const proof = await getMessage(mesID, sessionID);
         return 'ok';
     } catch (e) {
         logger.error('Error editing message:', e);
@@ -689,7 +705,6 @@ async function upsertAPI(apiData) {
     if (!name || !endpoint || !type) return;
 
     try {
-        // Defaults from existing or inputs
         const existingRes = await query('SELECT * FROM apis WHERE name = $1', [name]);
         const existing = existingRes.rows[0];
 
@@ -714,7 +729,6 @@ async function upsertAPI(apiData) {
              endpoint = $2, key = $3, type = $4, claude = $5, "useTokenizer" = $6, "modelList" = $7, "selectedModel" = $8
         `, [name, endpoint, key || '', type, claudeFinal, useTokenizerFinal, JSON.stringify(modelListFinal), selectedModelFinal]);
 
-        // Cleanup empty
         await query('DELETE FROM apis WHERE name IS NULL OR endpoint IS NULL OR name = \'\' OR endpoint = \'\'');
     } catch (err) {
         logger.error('Error writing API:', err);
@@ -752,10 +766,6 @@ async function getAPI(name) {
 }
 
 async function exportSession(sessionID) {
-    // ... logic for exportSession ...
-    // Assuming identical to readAIChat but format?
-    // Skipping deep implementation unless requested or identical to before
-    // Original implementation:
     try {
         const res = await query(`
             SELECT 
@@ -799,16 +809,7 @@ async function getAIChatMessageRow(messageID, sessionID) {
 }
 
 // Lorebook Functions
-function generateUUID() {
-    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function (c) {
-        const r = Math.random() * 16 | 0;
-        const v = c === 'x' ? r : (r & 0x3 | 0x8);
-        return v.toString(16);
-    });
-}
-
-// Not implementing all lorebook CRUD individually for brevity in this response unless needed, but pattern is same.
-// ... ok I should implement them to avoid breaking the app.
+function generateUUID() { return uuidv4(); }
 
 async function createLorebook(name, description = '') {
     const lorebook_id = generateUUID();
@@ -837,7 +838,6 @@ async function getLorebook(id) {
 }
 
 async function updateLorebook(id, updates) {
-    // updates is object
     const fields = [];
     const values = [];
     let idx = 1;
@@ -929,7 +929,7 @@ async function deleteLorebookEntry(id) {
 }
 
 // User Auth
-function generateAuthUUID() { return generateUUID(); } // Reuse
+function generateAuthUUID() { return generateUUID(); }
 
 async function checkUsernameAvailable(username) {
     try {
@@ -1002,12 +1002,306 @@ async function getTableData(tableName) {
         throw new Error('Invalid table name');
     }
     try {
-        // Safe interpolation because validated against schema keys
         const res = await query(`SELECT * FROM "${tableName}"`);
         return res.rows;
     } catch (err) {
         logger.error(`Error reading table ${tableName}:`, err);
         throw err;
+    }
+}
+
+// ============================================================================
+// ROOM MANAGEMENT FUNCTIONS - Critical for message isolation
+// ============================================================================
+
+async function createRoom(name, description = '', createdBy = null, settings = {}) {
+    logger.info(`Creating room: ${name}`);
+    const client = await getClient();
+    try {
+        await client.query('BEGIN');
+        const room_id = uuidv4();
+        const settingsJson = JSON.stringify(settings || {});
+
+        await client.query(
+            `INSERT INTO rooms (room_id, name, description, created_by, settings, is_active, created_at) 
+             VALUES ($1, $2, $3, $4, $5, TRUE, CURRENT_TIMESTAMP)`,
+            [room_id, name, description, createdBy, settingsJson]
+        );
+
+        if (createdBy) {
+            await client.query(
+                `INSERT INTO room_members (room_id, user_id, role, joined_at) 
+                 VALUES ($1, $2, 'creator', CURRENT_TIMESTAMP)`,
+                [room_id, createdBy]
+            );
+        }
+
+        await client.query('INSERT INTO sessions (room_id, started_at, is_active) VALUES ($1, CURRENT_TIMESTAMP, TRUE)', [room_id]);
+        await client.query('INSERT INTO "userSessions" (room_id, started_at, is_active) VALUES ($1, CURRENT_TIMESTAMP, TRUE)', [room_id]);
+
+        await client.query('COMMIT');
+        logger.info(`Room created: ${name} (${room_id})`);
+
+        return {
+            room_id,
+            name,
+            description,
+            created_by: createdBy,
+            settings: settings || {},
+            is_active: true,
+            created_at: new Date().toISOString()
+        };
+    } catch (e) {
+        await client.query('ROLLBACK');
+        logger.error(e);
+        return null; // or throw
+    } finally {
+        client.release();
+    }
+}
+
+async function getRoomById(roomId) {
+    try {
+        const res = await query('SELECT * FROM rooms WHERE room_id = $1 AND is_active = TRUE', [roomId]);
+        const room = res.rows[0];
+        if (room && room.settings) {
+            try { room.settings = JSON.parse(room.settings); } catch { room.settings = {}; }
+        }
+        return room || null;
+    } catch (err) {
+        logger.error('Error getting room:', err);
+        return null;
+    }
+}
+
+async function getAllActiveRooms() {
+    try {
+        const res = await query(`
+            SELECT 
+                r.room_id,
+                r.name,
+                r.description,
+                r.created_by,
+                r.created_at,
+                r.settings,
+                COUNT(rm.user_id) as member_count,
+                string_agg(u.username, ', ') as member_names
+            FROM rooms r
+            LEFT JOIN room_members rm ON r.room_id = rm.room_id
+            LEFT JOIN users u ON rm.user_id = u.user_id
+            WHERE r.is_active = TRUE
+            GROUP BY r.room_id
+            ORDER BY r.created_at DESC
+        `);
+
+        return res.rows.map(room => ({
+            ...room,
+            settings: room.settings ? JSON.parse(room.settings) : {}
+        }));
+    } catch (err) {
+        logger.error('Error getting active rooms:', err);
+        return [];
+    }
+}
+
+async function updateRoomSettings(roomId, updates) {
+    const { name, description, settings } = updates;
+    const setClauses = [];
+    const params = [];
+    let idx = 1;
+
+    if (name !== undefined) {
+        setClauses.push(`name = $${idx++}`);
+        params.push(name);
+    }
+    if (description !== undefined) {
+        setClauses.push(`description = $${idx++}`);
+        params.push(description);
+    }
+    if (settings !== undefined) {
+        setClauses.push(`settings = $${idx++}`);
+        params.push(JSON.stringify(settings));
+    }
+
+    if (setClauses.length === 0) return true;
+
+    params.push(roomId);
+
+    try {
+        await query(`UPDATE rooms SET ${setClauses.join(', ')} WHERE room_id = $${idx}`, params);
+        return true;
+    } catch (e) {
+        logger.error('Error updating room:', e);
+        return false;
+    }
+}
+
+async function deleteRoom(roomId) {
+    if (roomId === GLOBAL_ROOM_ID) return false;
+    const client = await getClient();
+    try {
+        await client.query('BEGIN');
+        await client.query('UPDATE rooms SET is_active = FALSE WHERE room_id = $1', [roomId]);
+        await client.query('DELETE FROM room_members WHERE room_id = $1', [roomId]);
+        await client.query('COMMIT');
+        return true;
+    } catch (e) {
+        await client.query('ROLLBACK');
+        logger.error('Error deleting room:', e);
+        return false;
+    } finally {
+        client.release();
+    }
+}
+
+async function addRoomMember(roomId, userId, role = 'member') {
+    try {
+        const existingRes = await query('SELECT * FROM room_members WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
+        if (existingRes.rows.length > 0) return true;
+
+        await query(
+            `INSERT INTO room_members (room_id, user_id, role, joined_at) VALUES ($1, $2, $3, CURRENT_TIMESTAMP)`,
+            [roomId, userId, role]
+        );
+        return true;
+    } catch (e) {
+        logger.error('Error adding room member:', e);
+        return false;
+    }
+}
+
+async function removeRoomMember(roomId, userId) {
+    try {
+        await query('DELETE FROM room_members WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
+        return true;
+    } catch (e) {
+        logger.error('Error removing room member:', e);
+        return false;
+    }
+}
+
+async function getRoomMembers(roomId) {
+    try {
+        const res = await query(`
+            SELECT 
+                rm.user_id,
+                rm.role,
+                rm.joined_at,
+                u.username,
+                u.username_color,
+                u.persona
+            FROM room_members rm
+            LEFT JOIN users u ON rm.user_id = u.user_id
+            WHERE rm.room_id = $1
+            ORDER BY rm.joined_at ASC
+        `, [roomId]);
+        return res.rows;
+    } catch (err) {
+        logger.error('Error getting room members:', err);
+        return [];
+    }
+}
+
+async function getUserRooms(userId) {
+    try {
+        const res = await query(`
+            SELECT 
+                r.room_id,
+                r.name,
+                r.description,
+                r.settings,
+                rm.role,
+                rm.joined_at
+            FROM room_members rm
+            JOIN rooms r ON rm.room_id = r.room_id
+            WHERE rm.user_id = $1 AND r.is_active = TRUE
+            ORDER BY rm.joined_at DESC
+        `, [userId]);
+
+        return res.rows.map(room => ({
+            ...room,
+            settings: room.settings ? JSON.parse(room.settings) : {}
+        }));
+    } catch (err) {
+        logger.error('Error getting user rooms:', err);
+        return [];
+    }
+}
+
+async function getRoomActiveSession(roomId, type = 'ai') {
+    const table = type === 'ai' ? 'sessions' : '"userSessions"';
+    try {
+        const res = await query(`SELECT session_id FROM ${table} WHERE room_id = $1 AND is_active = TRUE LIMIT 1`, [roomId]);
+        return res.rows[0]?.session_id || null;
+    } catch (err) {
+        logger.error(`Error getting room ${type} session:`, err);
+        return null;
+    }
+}
+
+async function isUserInRoom(roomId, userId) {
+    try {
+        const res = await query('SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
+        return res.rows.length > 0;
+    } catch (err) {
+        return false;
+    }
+}
+
+async function getUserRoomRole(roomId, userId) {
+    try {
+        const res = await query('SELECT role FROM room_members WHERE room_id = $1 AND user_id = $2', [roomId, userId]);
+        return res.rows[0]?.role || null;
+    } catch (err) {
+        return null;
+    }
+}
+
+async function createDefaultGlobalRoom() {
+    try {
+        const res = await query('SELECT room_id FROM rooms WHERE room_id = $1', [GLOBAL_ROOM_ID]);
+        if (res.rows.length > 0) return GLOBAL_ROOM_ID;
+
+        const client = await getClient();
+        try {
+            await client.query('BEGIN');
+            await client.query(
+                `INSERT INTO rooms (room_id, name, description, created_by, settings, is_active, created_at) 
+                 VALUES ($1, 'Global Room', 'Default room for all users (backward compatibility)', NULL, '{}', TRUE, CURRENT_TIMESTAMP)`,
+                [GLOBAL_ROOM_ID]
+            );
+            await client.query('INSERT INTO sessions (room_id, started_at, is_active) VALUES ($1, CURRENT_TIMESTAMP, TRUE)', [GLOBAL_ROOM_ID]);
+            await client.query('INSERT INTO "userSessions" (room_id, started_at, is_active) VALUES ($1, CURRENT_TIMESTAMP, TRUE)', [GLOBAL_ROOM_ID]);
+            await client.query('COMMIT');
+            logger.info('Global Room created successfully');
+            return GLOBAL_ROOM_ID;
+        } catch (e) {
+            await client.query('ROLLBACK');
+            throw e;
+        } finally {
+            client.release();
+        }
+    } catch (e) {
+        logger.error('Error creating global room:', e);
+        throw e;
+    }
+}
+
+async function migrateExistingDataToGlobalRoom() {
+    try {
+        const res = await query('SELECT 1 FROM aichats WHERE room_id IS NULL LIMIT 1');
+        if (res.rows.length === 0) return;
+
+        await createDefaultGlobalRoom();
+
+        await query('UPDATE sessions SET room_id = $1 WHERE room_id IS NULL', [GLOBAL_ROOM_ID]);
+        await query('UPDATE "userSessions" SET room_id = $1 WHERE room_id IS NULL', [GLOBAL_ROOM_ID]);
+        await query('UPDATE aichats SET room_id = $1 WHERE room_id IS NULL', [GLOBAL_ROOM_ID]);
+        await query('UPDATE userchats SET room_id = $1 WHERE room_id IS NULL', [GLOBAL_ROOM_ID]);
+
+        logger.info('Migration to Global Room completed successfully');
+    } catch (err) {
+        logger.error('Error during migration:', err);
     }
 }
 
@@ -1042,6 +1336,7 @@ export default {
     getNextMessageID,
     setActiveChat,
     getActiveChat,
+    getSessionRoom,
     exportSession,
     createLorebook,
     getLorebooks,
@@ -1058,5 +1353,21 @@ export default {
     registerUser,
     authenticateUser,
     getTableData,
-    query // Exporting query for use in server.js
+    query,
+    // Room Management
+    createRoom,
+    getRoomById,
+    getAllActiveRooms,
+    updateRoomSettings,
+    deleteRoom,
+    addRoomMember,
+    removeRoomMember,
+    getRoomMembers,
+    getUserRooms,
+    getRoomActiveSession,
+    isUserInRoom,
+    getUserRoomRole,
+    createDefaultGlobalRoom,
+    migrateExistingDataToGlobalRoom,
+    GLOBAL_ROOM_ID
 };

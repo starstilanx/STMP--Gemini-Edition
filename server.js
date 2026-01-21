@@ -98,7 +98,7 @@ function broadcastQueueState() {
         current: currentResponder ? { value: currentResponder.value, displayName: currentResponder.displayName } : null,
         remaining: responseQueue.map(c => ({ value: c.value, displayName: c.displayName }))
     };
-    logger.info(`[Queue] Broadcast state: active=${payload.active} current=${payload.current?.displayName || 'none'} remaining=${payload.remaining.map(r=>r.displayName).join(', ')}`);
+    logger.info(`[Queue] Broadcast state: active=${payload.active} current=${payload.current?.displayName || 'none'} remaining=${payload.remaining.map(r => r.displayName).join(', ')}`);
     broadcast(payload);
 }
 
@@ -148,7 +148,7 @@ function buildResponseQueue(trigger, context, liveConfig, options = {}) {
         const first = active.find(c => (c.displayName || '').trim() === forceFirstDisplayName);
         const rest = active.filter(c => (c.displayName || '').trim() !== forceFirstDisplayName);
         const ordered = first ? [first].concat(shuffle(rest)) : shuffle(active.slice());
-        logger.info(`[Queue] Forced first responder: ${forceFirstDisplayName}. Order: ${ordered.map(c=>c.displayName).join(' -> ')}`);
+        logger.info(`[Queue] Forced first responder: ${forceFirstDisplayName}. Order: ${ordered.map(c => c.displayName).join(' -> ')}`);
         return ordered;
     }
 
@@ -180,7 +180,7 @@ function buildResponseQueue(trigger, context, liveConfig, options = {}) {
     const ordered = matched.map(m => m.c);
     const shuffledUnmatched = shuffle(unmatched);
     const finalOrder = ordered.concat(shuffledUnmatched);
-    logger.info(`[Queue] Ordered result: ${finalOrder.map(c=>c.displayName).join(' -> ')}`);
+    logger.info(`[Queue] Ordered result: ${finalOrder.map(c => c.displayName).join(' -> ')}`);
     return finalOrder;
 }
 
@@ -214,9 +214,9 @@ async function processNextInQueue(parsedMessage, user, selectedAPI, hordeKey, en
     // Apply legacy single-character fields for downstream API functions (with validation)
     liveConfig.promptConfig.selectedCharacter = currentResponder.value;
     liveConfig.promptConfig.selectedCharacterDisplayName = currentResponder.displayName;
-    const stillActive = (liveConfig.promptConfig.selectedCharacters||[]).some(c => c.value === currentResponder.value);
+    const stillActive = (liveConfig.promptConfig.selectedCharacters || []).some(c => c.value === currentResponder.value);
     if (!stillActive) {
-        const fallback = (liveConfig.promptConfig.selectedCharacters||[]).find(c => c.value && c.value !== 'None');
+        const fallback = (liveConfig.promptConfig.selectedCharacters || []).find(c => c.value && c.value !== 'None');
         logger.warn(`[Queue] Current responder ${currentResponder.displayName} no longer active; falling back to ${fallback?.displayName || 'NONE'}`);
         if (fallback) {
             liveConfig.promptConfig.selectedCharacter = fallback.value;
@@ -334,8 +334,8 @@ async function handleRequestAIResponse(parsedMessage, user, selectedAPI, hordeKe
             if (last?.entity === 'AI' && last?.username) {
                 const aiName = last.username; // displayName stored in chat history
                 // only force if that character is currently active and not muted
-                const active = (liveConfig.promptConfig.selectedCharacters||[]).filter(c => !c.isMuted && c.value && c.value !== 'None');
-                const found = active.find(c => (c.displayName||'').trim() === aiName.trim());
+                const active = (liveConfig.promptConfig.selectedCharacters || []).filter(c => !c.isMuted && c.value && c.value !== 'None');
+                const found = active.find(c => (c.displayName || '').trim() === aiName.trim());
                 if (found) {
                     responseQueue = buildResponseQueue(trigger, context, liveConfig, { forceFirstDisplayName: aiName });
                     // Mark that only the first responder should continue
@@ -381,7 +381,7 @@ async function getMostRecentUserMessageText() {
         let [aiData] = await db.readAIChat();
         const arr = JSON.parse(aiData);
         for (let i = arr.length - 1; i >= 0; i--) {
-            if (arr[i].entity === 'user' && arr[i].content) return (arr[i].content || '').replace(/<[^>]+>/g,'').trim();
+            if (arr[i].entity === 'user' && arr[i].content) return (arr[i].content || '').replace(/<[^>]+>/g, '').trim();
         }
     } catch (e) {
         logger.debug('[Queue] getMostRecentUserMessageText AIChat scan failed:', e.message);
@@ -390,7 +390,7 @@ async function getMostRecentUserMessageText() {
         let [userData] = await db.readUserChat();
         const arr2 = JSON.parse(userData);
         for (let i = arr2.length - 1; i >= 0; i--) {
-            if (arr2[i].content) return (arr2[i].content || '').replace(/<[^>]+>/g,'').trim();
+            if (arr2[i].content) return (arr2[i].content || '').replace(/<[^>]+>/g, '').trim();
         }
     } catch (e) {
         logger.debug('[Queue] getMostRecentUserMessageText userChat scan failed:', e.message);
@@ -422,6 +422,63 @@ async function resolveUsernameHint(parsedMessage, user) {
 }
 
 //MARK: Routes
+
+// NEW: Database access endpoint
+localApp.get('/api/db/:table', async (req, res) => {
+    const tableName = req.params.table;
+    try {
+        const data = await db.getTableData(tableName);
+        res.json(data);
+    } catch (err) {
+        if (err.message === 'Invalid table name') {
+            res.status(400).json({ error: 'Invalid table name' });
+        } else {
+            logger.error(`Error querying table ${tableName}:`, err);
+            res.status(500).json({ error: 'Internal server error' });
+        }
+    }
+});
+
+// Restored: Custom endpoints requested by user
+localApp.get('/api/aichats', async (req, res) => {
+    const chatId = req.query.chat_id;
+    // Using Postgres syntax ($1)
+    const sql = `SELECT * FROM aichats WHERE session_id = $1 ORDER BY created_at DESC LIMIT 50`;
+
+    try {
+        const result = await db.query(sql, [chatId]);
+        res.json(result.rows.reverse()); // Send array of messages
+    } catch (err) {
+        logger.error('Error in /api/aichats:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
+localApp.get('/api/users/:user_id', async (req, res) => {
+    const userId = req.params.user_id;
+
+    const sql = `
+    SELECT 
+      user_id, 
+      username, 
+      username_color, 
+      persona, 
+      created_at 
+    FROM users 
+    WHERE user_id = $1
+  `;
+
+    try {
+        const result = await db.query(sql, [userId]);
+        const row = result.rows[0];
+        if (!row) return res.status(404).json({ error: "User not found" });
+        res.json(row);
+    } catch (err) {
+        logger.error('Error in /api/users:', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 localApp.get('/', async (req, res) => {
     const filePath = path.join(__dirname, 'public/client.html');
     try {
@@ -953,7 +1010,7 @@ async function handleConnections(ws, type, request) {
         await db.upsertUser(uuid, thisUserUsername, thisUserColor); //register them
         await db.upsertUserRole(uuid, thisUserRole); //register their role
         logger.info(`New user registered: ${thisUserUsername} (${uuid}), color: ${thisUserColor}, role: ${thisUserRole}`);
-        
+
         // Initialize user object for closure access
         user = {
             user_id: uuid,
@@ -1038,9 +1095,9 @@ async function handleConnections(ws, type, request) {
             }
         }
 
-    // Keep in-memory APIConfig synchronized with DB result (ensures fields like useTokenizer are present)
-    liveConfig.APIConfig = APIConfig;
-    await fio.writeConfig(liveConfig);
+        // Keep in-memory APIConfig synchronized with DB result (ensures fields like useTokenizer are present)
+        liveConfig.APIConfig = APIConfig;
+        await fio.writeConfig(liveConfig);
 
         baseMessage.liveConfig = {
             promptConfig: {
@@ -1712,7 +1769,7 @@ async function handleConnections(ws, type, request) {
                 // ================================
                 // LOREBOOK / WORLD INFO HANDLERS
                 // ================================
-                
+
                 else if (parsedMessage.type === 'getLorebooksRequest') {
                     const lorebooks = await db.getLorebooks();
                     ws.send(JSON.stringify({
@@ -1796,11 +1853,11 @@ async function handleConnections(ws, type, request) {
 
             //process universal message types that all users can send
             //MARK: Universal WS Msgs
-            
+
             // ================================
             // USER AUTHENTICATION HANDLERS
             // ================================
-            
+
             if (parsedMessage.type === 'checkUsername') {
                 const available = await db.checkUsernameAvailable(parsedMessage.username);
                 ws.send(JSON.stringify({
@@ -1813,7 +1870,7 @@ async function handleConnections(ws, type, request) {
 
             else if (parsedMessage.type === 'registerUser') {
                 const { username, password, email } = parsedMessage;
-                
+
                 // Validate input
                 if (!username || username.length < 3 || username.length > 20) {
                     ws.send(JSON.stringify({
@@ -1831,7 +1888,7 @@ async function handleConnections(ws, type, request) {
                     }));
                     return;
                 }
-                
+
                 const result = await db.registerUser(username, password, email || null);
                 ws.send(JSON.stringify({
                     type: 'registerResponse',
@@ -1842,7 +1899,7 @@ async function handleConnections(ws, type, request) {
 
             else if (parsedMessage.type === 'loginUser') {
                 const { username, password } = parsedMessage;
-                
+
                 if (!username || !password) {
                     ws.send(JSON.stringify({
                         type: 'loginResponse',
@@ -1851,7 +1908,7 @@ async function handleConnections(ws, type, request) {
                     }));
                     return;
                 }
-                
+
                 const result = await db.authenticateUser(username, password);
                 ws.send(JSON.stringify({
                     type: 'loginResponse',
@@ -1863,11 +1920,11 @@ async function handleConnections(ws, type, request) {
             // Handle identity update after login (preserves session and host status)
             else if (parsedMessage.type === 'identityUpdate') {
                 logger.info(`[identityUpdate] Updating identity for ${thisUserUsername}: new UUID ${parsedMessage.newUUID}`);
-                
+
                 // Update the client's UUID mapping
                 const oldUUID = uuid;
                 const newUUID = parsedMessage.newUUID;
-                
+
                 // Transfer client data to new UUID while preserving role
                 if (clientsObject[oldUUID]) {
                     clientsObject[newUUID] = {
@@ -1876,22 +1933,22 @@ async function handleConnections(ws, type, request) {
                     };
                     delete clientsObject[oldUUID];
                 }
-                
+
                 // Update the closure variables
                 uuid = newUUID;
                 thisUserUsername = parsedMessage.username;
-                
+
                 // Update user in database, preserving their role
                 await db.upsertUser(newUUID, parsedMessage.username, userColor, parsedMessage.persona || '');
-                
+
                 // Preserve host role if they were host
                 if (thisUserRole === 'host') {
                     await db.upsertUserRole(newUUID, 'host');
                 }
-                
+
                 updateConnectedUsers();
                 await broadcastUserList();
-                
+
                 logger.info(`[identityUpdate] Identity updated successfully for ${parsedMessage.username}`);
                 return;
             }

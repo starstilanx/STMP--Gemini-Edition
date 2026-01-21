@@ -20,6 +20,7 @@
     "log4js": "^6.9.0",
     "openssl-nodejs": "1.0.5",
     "path": "^0.12.7",
+    "pg": "^8.17.2",
     "png-chunk-text": "^1.0.0",
     "png-chunks-encode": "^1.0.0",
     "png-chunks-extract": "^1.0.0",

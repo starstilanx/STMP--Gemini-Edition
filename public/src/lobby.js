@@ -353,8 +353,15 @@ export function handleRoomJoined(data) {
     // Apply room config if provided
     if (data.config) {
         // The room config contains selectedCharacter etc.
-        // This would update the UI to show room's character
-        console.log('[Lobby] Room config:', data.config);
+        // Apply this config to the UI
+        console.log('[Lobby] Applying room config:', data.config);
+
+        // Import handleconfig to apply the room's configuration
+        import('./handleconfig.js').then(handleconfig => {
+            handleconfig.processLiveConfig({ value: data.config });
+        }).catch(err => {
+            console.error('[Lobby] Failed to apply room config:', err);
+        });
     }
     
     // Update Past Chats list with room-specific past chats

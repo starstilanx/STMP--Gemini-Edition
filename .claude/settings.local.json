@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --check:*)",
+      "Bash(powershell -Command \"Get-Process | Where-Object {$_ProcessName -eq ''node''} | Stop-Process -Force\")",
+      "Bash(psql:*)",
+      "Bash(where:*)",
+      "Bash(node flush-database.js:*)",
+      "Bash(node flush-database-auto.js:*)",
+      "Bash(node check-sessions.js:*)",
+      "Bash(node check-messages.js:*)",
+      "Bash(node find-lost-messages.js:*)",
+      "Bash(node check-room-settings.js:*)",
+      "Bash(node fix-modellist.js:*)",
+      "Bash(node:*)"
+    ]
+  }
+}

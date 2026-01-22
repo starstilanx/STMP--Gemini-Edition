@@ -966,6 +966,10 @@ async function connectWebSocket(username) {
         }
         updateUserList('userList', userList);
         break;
+      case "personaUpdateConfirm":
+        console.log('[Persona] Update confirmed, new value:', parsedMessage.persona);
+        myPersona = parsedMessage.persona;
+        break;
       case "forceDisconnect":
         disconnectWebSocket();
         break;
@@ -1772,6 +1776,7 @@ $(async function () {
 
   // Send a message to the user chat
   $("#userProfileButton").off("click").on("click", function () {
+    console.log('[Persona Dialog] Opening with myPersona:', myPersona);
     const $dialog = $("<div>").html(`
         <textarea id="personaInput" class="width100p height100p" style="min-height: 150px; resize: none;" placeholder="Describe yourself...">${myPersona}</textarea>
     `);

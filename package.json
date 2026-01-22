@@ -6,11 +6,13 @@
   "main": "client.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "node server.js"
+    "start": "node server.js",
+    "migrate": "node src/migrate-to-postgres.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
     "dompurify": "^3.2.6",
+    "dotenv": "^16.0.0",
     "express": "^4.18.2",
     "fs": "0.0.1-security",
     "iconv-lite": "^0.6.3",
@@ -20,6 +22,7 @@
     "log4js": "^6.9.0",
     "openssl-nodejs": "1.0.5",
     "path": "^0.12.7",
+    "pg": "^8.11.0",
     "png-chunk-text": "^1.0.0",
     "png-chunks-encode": "^1.0.0",
     "png-chunks-extract": "^1.0.0",

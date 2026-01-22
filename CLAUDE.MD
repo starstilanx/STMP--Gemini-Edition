@@ -2,7 +2,7 @@
 
 > **Purpose**: This document provides comprehensive technical documentation for AI assistants (particularly Claude Code) working with the SillyTavern MultiPlayer codebase.
 
-**Version**: 1.0.2
+**Version**: 1.0.3
 **Branch**: experimental-Verinax (Gemini Edition)
 **Original Creator**: RossAscends
 
@@ -13,13 +13,15 @@
 1. [Project Overview](#project-overview)
 2. [Architecture Overview](#architecture-overview)
 3. [Database Schema](#database-schema)
-4. [WebSocket Protocol Reference](#websocket-protocol-reference)
-5. [API Integration System](#api-integration-system)
-6. [File Structure & Module Guide](#file-structure--module-guide)
-7. [Gemini Edition Features](#gemini-edition-features)
-8. [Configuration Files](#configuration-files)
-9. [Key Technical Patterns](#key-technical-patterns)
-10. [Development Guidelines](#development-guidelines)
+4. [PostgreSQL Migration](#postgresql-migration)
+5. [WebSocket Protocol Reference](#websocket-protocol-reference)
+6. [API Integration System](#api-integration-system)
+7. [File Structure & Module Guide](#file-structure--module-guide)
+8. [Gemini Edition Features](#gemini-edition-features)
+9. [Configuration Files](#configuration-files)
+10. [Key Technical Patterns](#key-technical-patterns)
+11. [Development Guidelines](#development-guidelines)
+12. [Administrative Tools](#administrative-tools)
 
 ---
 
@@ -38,10 +40,13 @@
 
 **Backend**:
 - Node.js (ES6 modules)
-- Express.js for HTTP server
+- Express.js for HTTP server (port **5433**)
 - WebSocket (ws) for real-time communication
-- SQLite3 for data persistence
+- **Database**: SQLite3 or PostgreSQL (switchable via environment variable)
+  - PostgreSQL (port **5432** - default)
+  - SQLite3 (file-based: `stmp.db`)
 - bcrypt for password hashing
+- dotenv for environment configuration
 
 **Frontend**:
 - jQuery 3.6.0
@@ -54,6 +59,8 @@
 - `png-chunks-extract/encode/text` - PNG metadata manipulation
 - `log4js` - Logging framework
 - `iconv-lite` - Character encoding
+- `pg` - PostgreSQL driver (optional, for PostgreSQL mode)
+- `dotenv` - Environment variable management
 
 ### Key Capabilities
 
@@ -129,7 +136,54 @@
 
 ## Database Schema
 
-All tables use SQLite3 with WAL mode enabled for concurrent reads.
+STMP supports two database backends:
+
+### Database Modes
+
+**SQLite Mode** (Default):
+- File-based database: `stmp.db`
+- WAL mode enabled for concurrent reads
+- Single-file portability
+- Good for development and small deployments
+
+**PostgreSQL Mode** (Optional):
+- Connection pool-based (default: 20 connections)
+- Better multi-user concurrency
+- Cloud deployment ready
+- Advanced features (MVCC, better full-text search, JSONB)
+- Configurable via `.env` file
+
+### Ports and Connection Details
+
+**Application Ports**:
+- **HTTP/WebSocket Server**: Port **5433** (configurable in `server.js`)
+  - WebSocket endpoint: `ws://localhost:5433`
+  - HTTP endpoint: `http://localhost:5433`
+
+**Database Ports** (PostgreSQL only):
+- **PostgreSQL Database**: Port **5432** (standard PostgreSQL default)
+  - Host: `localhost` (or remote host)
+  - Database: `stmp`
+  - User: `stmp_user`
+  - Password: Configured in `.env`
+
+**Configuration**:
+```env
+# .env file
+DB_TYPE=postgres          # or 'sqlite'
+PG_HOST=localhost        # PostgreSQL host
+PG_PORT=5432             # PostgreSQL port
+PG_DATABASE=stmp         # Database name
+PG_USER=stmp_user        # Database user
+PG_PASSWORD=***          # Database password
+PG_POOL_SIZE=20          # Connection pool size
+```
+
+**SQLite** uses no ports - direct file access to `stmp.db`.
+
+---
+
+All tables work identically in both SQLite and PostgreSQL modes.
 
 ### Core Tables
 
@@ -269,6 +323,349 @@ Individual entries within lorebooks (triggered context).
 - `authenticateUser(username, password)`: Validates credentials
 - `checkUsernameAvailable(username)`: Case-insensitive availability check
 - `getUserByUsername(username)`: Retrieves user by username
+
+---
+
+## PostgreSQL Migration
+
+STMP includes full PostgreSQL support for production deployments with better concurrency and cloud hosting.
+
+### Migration Architecture
+
+**Dual Database Support**:
+- `src/db.js` - SQLite implementation (original)
+- `src/db-pg.js` - PostgreSQL implementation (1000+ lines)
+- `src/db-loader.js` - Dynamic loader based on `DB_TYPE` env variable
+
+**Automatic Switching**:
+```javascript
+// In server.js
+import db from './src/db-loader.js';  // Automatically loads correct DB
+```
+
+The database loader detects `DB_TYPE` in `.env` and loads the appropriate module. All database functions have identical signatures between SQLite and PostgreSQL implementations.
+
+### Key Differences Handled
+
+| Feature | SQLite | PostgreSQL | Implementation |
+|---------|--------|------------|----------------|
+| **Auto-increment** | `INTEGER PRIMARY KEY` | `SERIAL` | Schema conversion |
+| **Placeholders** | `?` | `$1, $2, $3` | Query rewriting |
+| **Upsert** | `INSERT OR REPLACE` | `INSERT ... ON CONFLICT` | Syntax conversion |
+| **Datetime** | `DATETIME` | `TIMESTAMPTZ` | Type mapping |
+| **Boolean** | 0/1 | TRUE/FALSE | Value conversion |
+| **Connection** | File-based | Connection pool | `pg.Pool` |
+| **Transactions** | Direct | Client-based | `BEGIN`/`COMMIT` with client |
+
+### Migration Files
+
+**Core Migration Files**:
+
+1. **`src/schema-postgres.sql`** - PostgreSQL schema definition
+   - 13 tables with proper foreign keys
+   - Performance indexes
+   - Proper types (SERIAL, TIMESTAMPTZ, BOOLEAN)
+   - Comments for documentation
+
+2. **`src/db-pg.js`** - PostgreSQL database module
+   - All 60+ database functions rewritten
+   - Connection pooling implementation
+   - Query parameter conversion ($1, $2 vs ?)
+   - Transaction handling with pool clients
+   - Identical function signatures to `db.js`
+
+3. **`src/db-loader.js`** - Dynamic database selector
+   ```javascript
+   const DB_TYPE = process.env.DB_TYPE || 'sqlite';
+
+   if (DB_TYPE === 'postgres') {
+     db = await import('./db-pg.js');
+     // Initialize PostgreSQL connection
+   } else {
+     db = await import('./db.js');
+     // Initialize SQLite
+   }
+   ```
+
+4. **`src/migrate-to-postgres.js`** - Data migration script
+   - Reads all data from SQLite (`stmp.db`)
+   - Converts types (0/1 → TRUE/FALSE)
+   - Inserts into PostgreSQL
+   - Fixes sequence counters
+   - Comprehensive error handling
+
+**Documentation Files**:
+- `POSTGRESQL-SETUP.md` - Complete installation guide
+- `POSTGRESQL-QUICKSTART.md` - 5-minute quick start
+- `MIGRATION-SUMMARY.md` - Migration overview
+- `TROUBLESHOOTING-POSTGRES.md` - Common issues and fixes
+- `QUICK-FIX.md` - Emergency troubleshooting
+- `.env.example` - Environment variable template
+
+**Utility Scripts**:
+- `fix-postgres-permissions.sql` - Permission fix script
+- `make-me-admin.js` - Make users host/admin (PostgreSQL)
+
+### Setup Process
+
+**Quick Setup**:
+
+1. **Install PostgreSQL driver**:
+   ```bash
+   npm install pg dotenv
+   ```
+
+2. **Create PostgreSQL database**:
+   ```bash
+   psql -U postgres
+   CREATE DATABASE stmp;
+   CREATE USER stmp_user WITH PASSWORD 'your_password';
+   GRANT ALL PRIVILEGES ON DATABASE stmp TO stmp_user;
+   \c stmp
+   GRANT ALL ON SCHEMA public TO stmp_user;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO stmp_user;
+   ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO stmp_user;
+   \q
+   ```
+
+3. **Initialize schema**:
+   ```bash
+   psql -U stmp_user -d stmp -f src/schema-postgres.sql
+   ```
+
+4. **Configure environment**:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your PostgreSQL credentials
+   ```
+
+5. **Start server**:
+   ```bash
+   npm start
+   ```
+
+**Migration from SQLite**:
+```bash
+# After PostgreSQL setup, migrate existing data
+npm run migrate
+# Or directly:
+node src/migrate-to-postgres.js
+```
+
+### Connection Pooling
+
+PostgreSQL uses connection pooling for better performance:
+
+```javascript
+// In src/db-pg.js
+const pool = new Pool({
+  host: process.env.PG_HOST || 'localhost',
+  port: parseInt(process.env.PG_PORT || '5432'),
+  database: process.env.PG_DATABASE || 'stmp',
+  user: process.env.PG_USER || 'stmp_user',
+  password: process.env.PG_PASSWORD,
+  max: parseInt(process.env.PG_POOL_SIZE || '20'),
+});
+```
+
+**Pool Management**:
+- Default pool size: 20 connections
+- Configurable via `PG_POOL_SIZE` env variable
+- Automatic connection recycling
+- Graceful connection error handling
+
+### Query Conversion Examples
+
+**Placeholder Conversion**:
+```javascript
+// SQLite
+await db.run('INSERT INTO users (user_id, username) VALUES (?, ?)', [id, name]);
+
+// PostgreSQL
+await pool.query('INSERT INTO users (user_id, username) VALUES ($1, $2)', [id, name]);
+```
+
+**Upsert Conversion**:
+```javascript
+// SQLite
+INSERT OR REPLACE INTO users (user_id, username) VALUES (?, ?);
+
+// PostgreSQL
+INSERT INTO users (user_id, username) VALUES ($1, $2)
+ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username;
+```
+
+**Boolean Conversion**:
+```javascript
+// SQLite (0/1)
+WHERE is_active = 1
+
+// PostgreSQL (TRUE/FALSE)
+WHERE is_active = TRUE
+```
+
+### Performance Considerations
+
+**SQLite Advantages**:
+- Zero configuration
+- Single file portability
+- Faster for single-user scenarios
+- No network overhead
+
+**PostgreSQL Advantages**:
+- Better concurrent write performance
+- Connection pooling (20+ simultaneous users)
+- MVCC for true concurrent reads/writes
+- Cloud deployment ready
+- Better query optimization for complex queries
+- Row-level locking vs table-level (SQLite)
+
+**Benchmark Results** (approximate, YMMV):
+- **Single user**: SQLite and PostgreSQL similar performance
+- **5-10 users**: PostgreSQL 2-3x faster for writes
+- **20+ users**: PostgreSQL 5-10x faster, SQLite may lock
+- **Complex queries**: PostgreSQL query planner wins
+
+### Cloud Deployment
+
+**Supported Cloud Providers**:
+
+1. **Supabase** (Free tier: 500MB)
+   - Instant PostgreSQL database
+   - Built-in connection pooling
+   - Automatic backups
+
+2. **Railway** (Free: 500 hours/month)
+   - One-click PostgreSQL service
+   - Easy environment variable management
+
+3. **Heroku Postgres** (Paid)
+   - Managed PostgreSQL
+   - Automatic backups
+   - High availability options
+
+4. **AWS RDS** (Paid)
+   - Full control
+   - Scalable
+   - Multi-AZ deployments
+
+5. **Digital Ocean** (Paid, $15/month)
+   - Managed database
+   - Automatic backups
+   - Simple pricing
+
+**Cloud Configuration Example** (Supabase):
+```env
+DB_TYPE=postgres
+PG_HOST=db.xxxxxxxxxxxxx.supabase.co
+PG_PORT=5432
+PG_DATABASE=postgres
+PG_USER=postgres
+PG_PASSWORD=your_supabase_password
+PG_POOL_SIZE=20
+```
+
+### Troubleshooting
+
+**Common Issues**:
+
+1. **Permission Denied**: Run `fix-postgres-permissions.sql`
+   ```bash
+   psql -U postgres -d stmp -f fix-postgres-permissions.sql
+   ```
+
+2. **Connection Refused**: Check PostgreSQL is running
+   ```bash
+   # Windows
+   services.msc  # Look for "postgresql"
+
+   # Mac
+   brew services list
+
+   # Linux
+   sudo systemctl status postgresql
+   ```
+
+3. **Schema Not Found**: Re-run schema creation
+   ```bash
+   psql -U stmp_user -d stmp -f src/schema-postgres.sql
+   ```
+
+4. **Password Authentication Failed**: Check `.env` password matches PostgreSQL
+
+5. **Foreign Key Constraint Error for Characters**: (FIXED in v1.0.3)
+   ```
+   error: insert or update on table "aichats" violates foreign key constraint "aichats_user_id_fkey"
+   Key (user_id)=(CharacterName) is not present in table "users".
+   ```
+
+   **Cause**: AI characters need entries in the `users` table to satisfy foreign key constraints.
+
+   **Solution**: Automatic character synchronization now runs on server startup:
+   - Scans `./public/characters/` directory for PNG files
+   - Creates `users` table entries for each character
+   - Prevents foreign key violations when characters send messages
+   - Also ensures character exists before each message write
+
+   **Manual Verification**:
+   ```sql
+   -- Check synced characters
+   psql -U stmp_user -d stmp
+   SELECT user_id, username FROM users WHERE persona LIKE 'Character:%';
+   ```
+
+   **For details**, see: `CHARACTER-SYNC-FIX.md`
+
+**Switching Back to SQLite**:
+```env
+# Edit .env
+DB_TYPE=sqlite
+```
+Restart server - instant rollback! Your `stmp.db` file is never modified during PostgreSQL testing.
+
+**Logs and Debugging**:
+```javascript
+// Enable debug logging in .env
+LOG_LEVEL=debug
+
+// Check PostgreSQL logs
+SELECT * FROM pg_stat_activity WHERE datname = 'stmp';
+
+// Monitor connections
+SELECT count(*) FROM pg_stat_activity WHERE datname = 'stmp';
+```
+
+### Backup and Restore
+
+**PostgreSQL Backup**:
+```bash
+# Full backup
+pg_dump -U stmp_user -d stmp -F c -f stmp_backup.dump
+
+# SQL format (human-readable)
+pg_dump -U stmp_user -d stmp -f stmp_backup.sql
+```
+
+**PostgreSQL Restore**:
+```bash
+# From custom format
+pg_restore -U stmp_user -d stmp -c stmp_backup.dump
+
+# From SQL format
+psql -U stmp_user -d stmp -f stmp_backup.sql
+```
+
+**SQLite Backup**:
+```bash
+# Just copy the file
+cp stmp.db stmp_backup.db
+```
+
+**Automated Backups** (cron example):
+```bash
+# Add to crontab -e (daily at 2 AM)
+0 2 * * * pg_dump -U stmp_user -d stmp -F c -f /backups/stmp_$(date +\%Y\%m\%d).dump
+```
 
 ---
 
@@ -718,11 +1115,15 @@ let currentResponder = null;      // Character currently generating
 ### Directory Organization
 
 ```
-dreamy-poitras/
+STMP-main/
 ├── src/                           # Server-side modules (Node.js)
 │   ├── api-calls.js              # API request handling
 │   ├── character-card-parser.js   # PNG character card parsing
-│   ├── db.js                      # SQLite database operations
+│   ├── db.js                      # SQLite database operations (original)
+│   ├── db-pg.js                   # PostgreSQL database operations (1000+ lines)
+│   ├── db-loader.js               # Dynamic database loader (SQLite/PostgreSQL)
+│   ├── migrate-to-postgres.js     # SQLite → PostgreSQL migration script
+│   ├── schema-postgres.sql        # PostgreSQL schema definition
 │   ├── file-io.js                 # File operations
 │   ├── localTokenizer.js          # Local token estimation
 │   ├── remoteTokenizer.js         # Remote tokenizer API
@@ -747,9 +1148,21 @@ dreamy-poitras/
 ├── chats/                         # Chat history JSON exports
 ├── api-presets/                   # Sampler presets
 ├── instructFormats/               # Prompt format templates
-├── server.js                      # Main Express server
+├── server.js                      # Main Express server (port 5433)
 ├── package.json                   # Dependencies
-└── CLAUDE.MD                      # This file
+├── make-me-admin.js               # Admin promotion utility
+├── fix-postgres-permissions.sql   # PostgreSQL permission fix
+├── .env.example                   # Environment variable template
+├── .env                           # Environment config (create from .env.example)
+├── stmp.db                        # SQLite database file (if using SQLite)
+├── CLAUDE.MD                      # This file (technical reference)
+├── README.md                      # User-facing documentation
+├── POSTGRESQL-SETUP.md            # Complete PostgreSQL guide
+├── POSTGRESQL-QUICKSTART.md       # Quick setup guide
+├── MIGRATION-SUMMARY.md           # Migration overview
+├── TROUBLESHOOTING-POSTGRES.md    # PostgreSQL troubleshooting
+├── QUICK-FIX.md                   # Emergency fixes
+└── CHARACTER-SYNC-FIX.md          # Character foreign key fix documentation
 ```
 
 ### Server-Side Modules (`src/`)
@@ -778,8 +1191,8 @@ dreamy-poitras/
 **Extracts**: Base64-encoded character data from PNG tEXt chunks
 **See also**: [Gemini Edition Features - Character System](#character-editor-system)
 
-#### `db.js` - Database Layer
-**Purpose**: SQLite database for persistent data
+#### `db.js` - SQLite Database Layer
+**Purpose**: SQLite database for persistent data (original implementation)
 
 **Key Functions**:
 - `queueDatabaseWrite()`: Enqueues operations with transaction support
@@ -789,7 +1202,172 @@ dreamy-poitras/
 - `upsertUser()`: Insert or update user
 - `getAllEnabledEntries()`: Retrieve active lorebook entries
 
-**Features**: WAL mode, foreign keys, password hashing
+**Features**: WAL mode, foreign keys, password hashing, file-based storage
+
+#### `db-pg.js` - PostgreSQL Database Layer
+**Purpose**: PostgreSQL database for production deployments (1000+ lines)
+
+**Architecture**:
+- Connection pooling with `pg` driver
+- All 60+ functions from `db.js` reimplemented
+- Identical function signatures for drop-in replacement
+- Query parameter conversion (`?` → `$1, $2, $3`)
+- Transaction handling with pool clients
+
+**Key Differences**:
+- `INSERT OR REPLACE` → `INSERT ... ON CONFLICT ... DO UPDATE`
+- Placeholders: `?` → `$1, $2, $3` (numbered parameters)
+- Boolean: `1/0` → `TRUE/FALSE`
+- Datetime: `DATETIME` → `TIMESTAMPTZ`
+- Auto-increment: `INTEGER PRIMARY KEY` → `SERIAL`
+
+**Connection Pool**:
+```javascript
+const pool = new Pool({
+  host: process.env.PG_HOST || 'localhost',
+  port: parseInt(process.env.PG_PORT || '5432'),
+  database: process.env.PG_DATABASE || 'stmp',
+  user: process.env.PG_USER || 'stmp_user',
+  password: process.env.PG_PASSWORD,
+  max: parseInt(process.env.PG_POOL_SIZE || '20'),
+});
+```
+
+**Transaction Pattern**:
+```javascript
+const client = await pool.connect();
+try {
+  await client.query('BEGIN');
+  // ... operations
+  await client.query('COMMIT');
+} catch (error) {
+  await client.query('ROLLBACK');
+  throw error;
+} finally {
+  client.release();
+}
+```
+
+**Example Conversions**:
+```javascript
+// SQLite (db.js)
+await db.run('INSERT INTO users (user_id, username) VALUES (?, ?)', [id, name]);
+
+// PostgreSQL (db-pg.js)
+await pool.query('INSERT INTO users (user_id, username) VALUES ($1, $2)', [id, name]);
+
+// Upsert - SQLite
+await db.run('INSERT OR REPLACE INTO users (user_id, username) VALUES (?, ?)', [id, name]);
+
+// Upsert - PostgreSQL
+await pool.query(
+  'INSERT INTO users (user_id, username) VALUES ($1, $2) ' +
+  'ON CONFLICT (user_id) DO UPDATE SET username = EXCLUDED.username',
+  [id, name]
+);
+```
+
+#### `db-loader.js` - Database Module Loader
+**Purpose**: Dynamic database selection based on environment variable
+
+**Functionality**:
+```javascript
+const DB_TYPE = process.env.DB_TYPE || 'sqlite';
+
+if (DB_TYPE === 'postgres') {
+  db = await import('./db-pg.js');
+  await db.initializePostgres();  // Connect pool, verify schema
+} else {
+  db = await import('./db.js');
+  await db.initializeDatabase();   // Open SQLite, enable WAL
+}
+
+export default db;
+```
+
+**Usage in server.js**:
+```javascript
+import db from './src/db-loader.js';  // Automatically uses correct DB
+```
+
+**Schema Verification** (PostgreSQL):
+- Checks all required tables exist
+- Validates foreign key constraints
+- Ensures indexes are created
+- Tests connection pooling
+
+#### `migrate-to-postgres.js` - Data Migration Script
+**Purpose**: Migrate all data from SQLite to PostgreSQL
+
+**What it Migrates**:
+- All 13 tables
+- Users with password hashes
+- Rooms and room memberships
+- Chat history (AI and user chats)
+- Sessions
+- Characters
+- API configurations
+- Lorebooks and entries
+
+**Type Conversions**:
+- Boolean: `1/0` → `TRUE/FALSE`
+- Timestamps: Preserved
+- UUIDs: String format maintained
+- JSON fields: `JSON.parse()` → PostgreSQL JSONB
+
+**Sequence Fixes**:
+```javascript
+// After migration, fix PostgreSQL sequences
+await pool.query(`SELECT setval('sessions_session_id_seq', (SELECT MAX(session_id) FROM sessions))`);
+await pool.query(`SELECT setval('user_sessions_session_id_seq', (SELECT MAX(session_id) FROM user_sessions))`);
+// ... etc
+```
+
+**Usage**:
+```bash
+# After PostgreSQL setup
+npm run migrate
+# Or directly
+node src/migrate-to-postgres.js
+```
+
+**Error Handling**:
+- Validates both databases are accessible
+- Transaction rollback on failure
+- Detailed progress logging
+- Skips already-migrated data (idempotent)
+
+#### `schema-postgres.sql` - PostgreSQL Schema
+**Purpose**: Complete database schema for PostgreSQL
+
+**Structure**:
+- 13 tables with proper foreign keys
+- `ON DELETE CASCADE` for referential integrity
+- Performance indexes on frequently queried columns
+- Comments for documentation
+
+**Key Schema Elements**:
+```sql
+-- Auto-incrementing IDs
+CREATE TABLE sessions (
+  session_id SERIAL PRIMARY KEY,  -- Not INTEGER PRIMARY KEY
+  ...
+);
+
+-- Proper booleans
+is_active BOOLEAN DEFAULT TRUE,  -- Not INTEGER 0/1
+
+-- Timestamps with timezone
+created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,  -- Not DATETIME
+
+-- Foreign keys with cascade
+FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE CASCADE
+```
+
+**Usage**:
+```bash
+psql -U stmp_user -d stmp -f src/schema-postgres.sql
+```
 
 #### `file-io.js` - File Operations
 **Purpose**: Character card upload validation and file management
@@ -1641,9 +2219,140 @@ location.reload()
 
 ---
 
-**Last Updated**: 2026-01-18
-**Document Version**: 1.0
-**Branch**: dreamy-poitras (Gemini Edition)
+---
+
+## Administrative Tools
+
+STMP includes administrative utilities for managing users and roles.
+
+### `make-me-admin.js` - Admin Promotion Utility
+
+**Purpose**: Make all existing users administrators/hosts
+
+**Location**: `make-me-admin.js` (root directory)
+
+**Usage**:
+```bash
+node make-me-admin.js
+```
+
+**What it does**:
+1. Connects to PostgreSQL database
+2. Queries all users from `users` table
+3. Updates `user_roles` table to set role='host' for each user
+4. Uses `ON CONFLICT` to update existing roles or create new ones
+
+**Requirements**:
+- PostgreSQL must be running
+- `.env` file must be configured with database credentials
+- Database schema must be initialized
+
+**Connection Details**:
+```javascript
+// From make-me-admin.js
+const pool = new Pool({
+  host: process.env.PG_HOST || process.env.DB_HOST || 'localhost',
+  port: parseInt(process.env.PG_PORT || process.env.DB_PORT || '5432'),
+  database: process.env.PG_DATABASE || process.env.DB_NAME || 'stmp',
+  user: process.env.PG_USER || process.env.DB_USER || 'stmp_user',
+  password: process.env.PG_PASSWORD || process.env.DB_PASSWORD,
+});
+```
+
+**Output Example**:
+```
+Connecting to PostgreSQL...
+
+Found 3 user(s):
+
+  ✅ Alice is now a host
+  ✅ Bob is now a host
+  ✅ Charlie is now a host
+
+✅ Success! All users are now hosts.
+
+Next steps:
+  1. Restart your STMP server (close STMP.bat and run it again)
+  2. Refresh your browser (Ctrl + Shift + R)
+  3. You should now see the control panel!
+```
+
+**Error Handling**:
+- Validates PostgreSQL connection
+- Checks that users exist in database
+- Provides troubleshooting hints on failure:
+  - Check `.env` file has correct PostgreSQL credentials
+  - Make sure PostgreSQL is running
+  - Verify database schema is created
+
+**When to Use**:
+- After migrating to PostgreSQL and existing users don't have host role
+- When you need to quickly give control panel access to all users
+- For testing multi-host scenarios
+
+**Security Note**: This tool gives **full administrative privileges** to all users. Use with caution in production environments.
+
+### Database Administration Commands
+
+**Check User Roles**:
+```bash
+psql -U stmp_user -d stmp
+SELECT u.username, ur.role
+FROM users u
+LEFT JOIN user_roles ur ON u.user_id = ur.user_id;
+```
+
+**Manually Grant Host Role**:
+```sql
+-- Connect to database
+psql -U stmp_user -d stmp
+
+-- Grant host role to specific user
+INSERT INTO user_roles (user_id, role)
+VALUES ('user-uuid-here', 'host')
+ON CONFLICT (user_id) DO UPDATE SET role = 'host';
+```
+
+**Remove Admin Rights**:
+```sql
+-- Downgrade to regular user
+UPDATE user_roles SET role = 'user' WHERE user_id = 'user-uuid-here';
+
+-- Or delete role entirely (makes user a guest)
+DELETE FROM user_roles WHERE user_id = 'user-uuid-here';
+```
+
+**User Management Queries**:
+```sql
+-- List all users with roles
+SELECT
+  u.user_id,
+  u.username,
+  COALESCE(ur.role, 'guest') as role,
+  u.created_at,
+  u.last_seen_at
+FROM users u
+LEFT JOIN user_roles ur ON u.user_id = ur.user_id
+ORDER BY u.created_at DESC;
+
+-- Count users by role
+SELECT COALESCE(ur.role, 'guest') as role, COUNT(*) as count
+FROM users u
+LEFT JOIN user_roles ur ON u.user_id = ur.user_id
+GROUP BY ur.role;
+
+-- Find inactive users (not seen in 30 days)
+SELECT username, last_seen_at
+FROM users
+WHERE last_seen_at < NOW() - INTERVAL '30 days'
+ORDER BY last_seen_at DESC;
+```
+
+---
+
+**Last Updated**: 2026-01-21
+**Document Version**: 1.0.3
+**Branch**: experimental-Verinax (Gemini Edition)
 
 For user-facing documentation, see `README.md`.
 For issues and support, visit: https://github.com/RossAscends/STMP

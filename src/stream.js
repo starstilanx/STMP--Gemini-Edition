@@ -137,7 +137,8 @@ const createTextListener = async (parsedMessage, liveConfig, AIChatUserList, use
                 await db.editMessage(targetSessionID, targetMessageID, trimmed);
             } else {
                 // Pass roomId for room-scoped chat isolation
-                await db.writeAIChatMessage(liveConfig.promptConfig.selectedCharacterDisplayName, 'AI', trimmed, 'AI', parsedMessage?.roomId);
+                // Use character name as userId for proper character tracking
+                await db.writeAIChatMessage(liveConfig.promptConfig.selectedCharacterDisplayName, liveConfig.promptConfig.selectedCharacterDisplayName, trimmed, 'AI', parsedMessage?.roomId);
             }
         } catch (e) {
             logger.warn('Failed to persist streamed response to DB:', e?.message || e);
@@ -175,7 +176,8 @@ const createTextListener = async (parsedMessage, liveConfig, AIChatUserList, use
             characterDisplayName: liveConfig.promptConfig.selectedCharacterDisplayName,
             characterValue: liveConfig.promptConfig.selectedCharacter,
             chatID: parsedMessage.chatID,
-            streamed: true
+            streamed: true,
+            roomId: parsedMessage.roomId || null
         });
         //}
     };
@@ -310,8 +312,9 @@ async function handleResponse(parsedMessage, selectedAPI, hordeKey, engineMode, 
 
         const trimmed = api.trimIncompleteSentences(AIResponse);
         // Persist and capture DB-assigned message_id and timestamp (with room context)
+        // Use character name as userId for proper character tracking
         const writeMeta = await db.writeAIChatMessage(
-            liveConfig.promptConfig.selectedCharacterDisplayName, 'AI', trimmed, 'AI', parsedMessage?.roomId
+            liveConfig.promptConfig.selectedCharacterDisplayName, liveConfig.promptConfig.selectedCharacterDisplayName, trimmed, 'AI', parsedMessage?.roomId
         );
         if (writeMeta) {
             AIResponseMessage.sessionID = writeMeta.sessionId;
@@ -329,7 +332,8 @@ async function handleResponse(parsedMessage, selectedAPI, hordeKey, engineMode, 
             characterDisplayName: liveConfig.promptConfig.selectedCharacterDisplayName,
             characterValue: liveConfig.promptConfig.selectedCharacter,
             chatID: parsedMessage.chatID,
-            streamed: false
+            streamed: false,
+            roomId: parsedMessage.roomId || null
         });
     }
 }

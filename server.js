@@ -10,7 +10,7 @@ import express from 'express';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
-import db from './src/db.js';
+import db from './src/db-loader.js';  // Auto-loads SQLite or PostgreSQL based on DB_TYPE env var
 import fio from './src/file-io.js';
 import api from './src/api-calls.js';
 import converter from './src/purify.js';
@@ -85,21 +85,39 @@ const __dirname = path.dirname(__filename);
 const secretsPath = path.join(__dirname, 'secrets.json');
 let engineMode = 'TC'
 
-// ================= Multi-Character Queue State (New) =================
-// In-memory queue of pending character responses; elements: { value, displayName }
-let responseQueue = [];
-let queueActive = false; // indicates queue processing in progress
-let currentResponder = null; // the character currently generating a response
+// ================= Multi-Character Queue State (Room-Scoped) =================
+// Room-scoped queue state: Map<roomId, { queue, active, current }>
+// roomId of null/undefined represents global queue
+const roomQueues = new Map();
 
-function broadcastQueueState() {
+function getQueueState(roomId = null) {
+    const key = roomId || 'global';
+    if (!roomQueues.has(key)) {
+        roomQueues.set(key, {
+            queue: [],
+            active: false,
+            current: null
+        });
+    }
+    return roomQueues.get(key);
+}
+
+function broadcastQueueState(roomId = null) {
+    const state = getQueueState(roomId);
     const payload = {
         type: 'responseQueueUpdate',
-        active: queueActive,
-        current: currentResponder ? { value: currentResponder.value, displayName: currentResponder.displayName } : null,
-        remaining: responseQueue.map(c => ({ value: c.value, displayName: c.displayName }))
+        active: state.active,
+        current: state.current ? { value: state.current.value, displayName: state.current.displayName } : null,
+        remaining: state.queue.map(c => ({ value: c.value, displayName: c.displayName })),
+        roomId: roomId
     };
-    logger.info(`[Queue] Broadcast state: active=${payload.active} current=${payload.current?.displayName || 'none'} remaining=${payload.remaining.map(r=>r.displayName).join(', ')}`);
-    broadcast(payload);
+    logger.info(`[Queue] Broadcast state for room ${roomId || 'global'}: active=${payload.active} current=${payload.current?.displayName || 'none'} remaining=${payload.remaining.map(r=>r.displayName).join(', ')}`);
+
+    if (roomId) {
+        broadcastToRoom(roomId, payload);
+    } else {
+        broadcast(payload);
+    }
 }
 
 function migrateSelectedCharactersIfNeeded(liveConfig) {
@@ -192,41 +210,43 @@ function shuffle(arr) {
     return arr;
 }
 
-async function startQueueProcessing(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig) {
-    if (queueActive) return; // already processing
-    queueActive = true;
-    logger.info(`[Queue] Starting queue with ${responseQueue.length} characters.`);
-    broadcastQueueState();
-    processNextInQueue(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig);
+async function startQueueProcessing(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig, roomId = null) {
+    const state = getQueueState(roomId);
+    if (state.active) return; // already processing
+    state.active = true;
+    logger.info(`[Queue] Starting queue for room ${roomId || 'global'} with ${state.queue.length} characters.`);
+    broadcastQueueState(roomId);
+    processNextInQueue(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig, roomId);
 }
 
-async function processNextInQueue(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig) {
-    if (responseQueue.length === 0) {
-        queueActive = false;
-        currentResponder = null;
-        logger.info('[Queue] Queue exhausted.');
-        broadcastQueueState();
+async function processNextInQueue(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig, roomId = null) {
+    const state = getQueueState(roomId);
+    if (state.queue.length === 0) {
+        state.active = false;
+        state.current = null;
+        logger.info(`[Queue] Queue exhausted for room ${roomId || 'global'}.`);
+        broadcastQueueState(roomId);
         return;
     }
-    currentResponder = responseQueue.shift();
-    logger.info(`[Queue] Processing next responder: ${currentResponder.displayName}. Remaining after this: ${responseQueue.length}`);
-    broadcastQueueState();
+    state.current = state.queue.shift();
+    logger.info(`[Queue] Processing next responder for room ${roomId || 'global'}: ${state.current.displayName}. Remaining after this: ${state.queue.length}`);
+    broadcastQueueState(roomId);
     // Apply legacy single-character fields for downstream API functions (with validation)
-    liveConfig.promptConfig.selectedCharacter = currentResponder.value;
-    liveConfig.promptConfig.selectedCharacterDisplayName = currentResponder.displayName;
-    const stillActive = (liveConfig.promptConfig.selectedCharacters||[]).some(c => c.value === currentResponder.value);
+    liveConfig.promptConfig.selectedCharacter = state.current.value;
+    liveConfig.promptConfig.selectedCharacterDisplayName = state.current.displayName;
+    const stillActive = (liveConfig.promptConfig.selectedCharacters||[]).some(c => c.value === state.current.value);
     if (!stillActive) {
         const fallback = (liveConfig.promptConfig.selectedCharacters||[]).find(c => c.value && c.value !== 'None');
-        logger.warn(`[Queue] Current responder ${currentResponder.displayName} no longer active; falling back to ${fallback?.displayName || 'NONE'}`);
+        logger.warn(`[Queue] Current responder ${state.current.displayName} no longer active; falling back to ${fallback?.displayName || 'NONE'}`);
         if (fallback) {
             liveConfig.promptConfig.selectedCharacter = fallback.value;
             liveConfig.promptConfig.selectedCharacterDisplayName = fallback.displayName;
-            currentResponder = fallback; // keep consistency
+            state.current = fallback; // keep consistency
         } else {
             logger.warn('[Queue] No fallback available; aborting queue processing.');
-            queueActive = false;
-            currentResponder = null;
-            broadcastQueueState();
+            state.active = false;
+            state.current = null;
+            broadcastQueueState(roomId);
             return;
         }
     }
@@ -242,52 +262,63 @@ async function processNextInQueue(parsedMessage, user, selectedAPI, hordeKey, en
     parsedMessage.__continueFirstOnly = false; // clear for subsequent responders
     await stream.handleResponse(
         { ...parsedMessage, chatID: 'AIChat' }, selectedAPI, hordeKey,
-        engineMode, user, liveConfig, shouldContinueForThis
+        engineMode, user, liveConfig, shouldContinueForThis, parsedMessage.sessionID
     );
 }
 
 // Listen for completion from stream.js to continue queue
-responseLifecycleEmitter.on('responseComplete', async () => {
-    if (!queueActive) return;
+responseLifecycleEmitter.on('responseComplete', async (context) => {
+    // Context should include roomId to identify which queue to process
+    const roomId = context?.roomId || null;
+    const state = getQueueState(roomId);
+    if (!state.active) return;
     // slight delay to avoid tight loop
     setTimeout(() => {
-        processNextInQueue(lastParsedMessageForQueue, lastUserForQueue, lastSelectedAPIForQueue, lastHordeKeyForQueue, lastEngineModeForQueue, lastLiveConfigForQueue);
+        const queueContext = queueContexts.get(roomId || 'global');
+        if (queueContext) {
+            processNextInQueue(
+                queueContext.parsedMessage,
+                queueContext.user,
+                queueContext.selectedAPI,
+                queueContext.hordeKey,
+                queueContext.engineMode,
+                queueContext.liveConfig,
+                roomId
+            );
+        }
     }, 25);
 });
 
-// Keep last context to reuse between queue steps
-let lastParsedMessageForQueue = null;
-let lastUserForQueue = null;
-let lastSelectedAPIForQueue = null;
-let lastHordeKeyForQueue = null;
-let lastEngineModeForQueue = null;
-let lastLiveConfigForQueue = null;
+// Room-scoped queue context storage: Map<roomId, { parsedMessage, user, ... }>
+const queueContexts = new Map();
 
-function captureQueueContext(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig) {
-    lastParsedMessageForQueue = parsedMessage;
-    lastUserForQueue = user;
-    lastSelectedAPIForQueue = selectedAPI;
-    lastHordeKeyForQueue = hordeKey;
-    lastEngineModeForQueue = engineMode;
-    lastLiveConfigForQueue = liveConfig;
+function captureQueueContext(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig, roomId = null) {
+    const key = roomId || 'global';
+    queueContexts.set(key, {
+        parsedMessage,
+        user,
+        selectedAPI,
+        hordeKey,
+        engineMode,
+        liveConfig
+    });
 }
 
 //MARK: requestAIResponse
 async function handleRequestAIResponse(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig, ws) {
     // ROOM ISOLATION: If in a room, use room's character config
-    const roomId = parsedMessage?.roomId;
+    // Get roomId from WebSocket connection first, fallback to message
+    const roomId = getWsRoom(ws) || parsedMessage?.roomId;
     if (roomId) {
+        logger.info(`[handleRequestAIResponse] Getting config for room ${roomId}`);
         const roomConfig = await getRoomConfig(roomId);
-        if (roomConfig && roomConfig.selectedCharacter) {
-            // Override global config with room's character
-            liveConfig.promptConfig.selectedCharacter = roomConfig.selectedCharacter;
-            liveConfig.promptConfig.selectedCharacterDisplayName = roomConfig.selectedCharacterDisplayName || roomConfig.selectedCharacter;
-            // If room has selectedCharacters array, use that
-            if (roomConfig.selectedCharacters && roomConfig.selectedCharacters.length > 0) {
-                liveConfig.promptConfig.selectedCharacters = roomConfig.selectedCharacters;
-            }
-            logger.info(`[Room] Using room ${roomId} character: ${liveConfig.promptConfig.selectedCharacterDisplayName}`);
-        }
+        // Override global config with room's character settings
+        liveConfig.promptConfig.selectedCharacter = roomConfig.promptConfig.selectedCharacter;
+        liveConfig.promptConfig.selectedCharacterDisplayName = roomConfig.promptConfig.selectedCharacterDisplayName;
+        liveConfig.promptConfig.selectedCharacters = roomConfig.promptConfig.selectedCharacters;
+        logger.info(`[Room] Using room ${roomId} character: ${liveConfig.promptConfig.selectedCharacterDisplayName}`, {
+            selectedCharacters: liveConfig.promptConfig.selectedCharacters
+        });
     }
     
     migrateSelectedCharactersIfNeeded(liveConfig);
@@ -312,9 +343,10 @@ async function handleRequestAIResponse(parsedMessage, user, selectedAPI, hordeKe
         }
     }
 
-    if (queueActive && trigger !== 'force' && trigger !== 'regenerate') {
+    const state = getQueueState(roomId);
+    if (state.active && trigger !== 'force' && trigger !== 'regenerate') {
         ws && ws.send && ws.send(JSON.stringify({ type: 'queueSuppressed', reason: 'queue_active' }));
-        logger.info('[Queue] Suppressed new trigger while queue active.');
+        logger.info(`[Queue] Suppressed new trigger while queue active for room ${roomId || 'global'}.`);
         return;
     }
 
@@ -332,11 +364,11 @@ async function handleRequestAIResponse(parsedMessage, user, selectedAPI, hordeKe
         }
         liveConfig.promptConfig.selectedCharacter = ch.value;
         liveConfig.promptConfig.selectedCharacterDisplayName = ch.displayName;
-        captureQueueContext(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig);
+        captureQueueContext(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig, roomId);
         logger.info(`[Queue] Direct ${trigger} response for ${ch.displayName}`);
         await stream.handleResponse(
-            { ...parsedMessage, chatID: 'AIChat' }, selectedAPI, hordeKey,
-            engineMode, user, liveConfig, false
+            { ...parsedMessage, chatID: 'AIChat', roomId }, selectedAPI, hordeKey,
+            engineMode, user, liveConfig, false, parsedMessage.sessionID
         );
         return;
     }
@@ -354,28 +386,28 @@ async function handleRequestAIResponse(parsedMessage, user, selectedAPI, hordeKe
                 const active = (liveConfig.promptConfig.selectedCharacters||[]).filter(c => !c.isMuted && c.value && c.value !== 'None');
                 const found = active.find(c => (c.displayName||'').trim() === aiName.trim());
                 if (found) {
-                    responseQueue = buildResponseQueue(trigger, context, liveConfig, { forceFirstDisplayName: aiName });
+                    state.queue = buildResponseQueue(trigger, context, liveConfig, { forceFirstDisplayName: aiName });
                     // Mark that only the first responder should continue
                     parsedMessage.__continueFirstOnly = true;
                 } else {
-                    responseQueue = buildResponseQueue(trigger, context, liveConfig);
+                    state.queue = buildResponseQueue(trigger, context, liveConfig);
                 }
             } else {
-                responseQueue = buildResponseQueue(trigger, context, liveConfig);
+                state.queue = buildResponseQueue(trigger, context, liveConfig);
             }
         } catch (e) {
             logger.debug('[Queue] Continue inspection failed, defaulting queue:', e.message);
-            responseQueue = buildResponseQueue(trigger, context, liveConfig);
+            state.queue = buildResponseQueue(trigger, context, liveConfig);
         }
     } else {
-        responseQueue = buildResponseQueue(trigger, context, liveConfig);
+        state.queue = buildResponseQueue(trigger, context, liveConfig);
     }
-    if (responseQueue.length === 0) {
+    if (state.queue.length === 0) {
         logger.info('[Queue] No characters to enqueue (none selected or all muted).');
         return;
     }
-    captureQueueContext(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig);
-    await startQueueProcessing(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig);
+    captureQueueContext(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig, roomId);
+    await startQueueProcessing(parsedMessage, user, selectedAPI, hordeKey, engineMode, liveConfig, roomId);
 }
 
 async function getLastUserMessageUsername(roomId = null) {
@@ -610,29 +642,88 @@ function getRoomConnections(roomId) {
  * @returns {object} Room configuration
  */
 async function getRoomConfig(roomId) {
+    // Check cache first
     if (roomConfigs.has(roomId)) {
-        return roomConfigs.get(roomId);
+        const cached = roomConfigs.get(roomId);
+        // If cached config is a full liveConfig structure, return it
+        if (cached.promptConfig) {
+            return cached;
+        }
     }
-    
+
     // Load from database
     const room = await db.getRoomById(roomId);
-    if (room && room.settings) {
-        roomConfigs.set(roomId, room.settings);
-        return room.settings;
+    let roomSettings = room?.settings || {};
+
+    logger.info(`[getRoomConfig] Raw settings from DB for room ${roomId}:`, JSON.stringify(roomSettings));
+
+    // If settings is a string (JSON), parse it
+    if (typeof roomSettings === 'string') {
+        try {
+            roomSettings = JSON.parse(roomSettings);
+            logger.info(`[getRoomConfig] Parsed settings:`, JSON.stringify(roomSettings));
+        } catch (e) {
+            logger.warn(`[getRoomConfig] Failed to parse room settings for room ${roomId}:`, e);
+            roomSettings = {};
+        }
     }
-    
-    // Return empty config if room not found
-    return {};
+
+    // Build full config by merging room-specific settings with global liveConfig
+    const roomConfig = JSON.parse(JSON.stringify(liveConfig)); // Deep copy
+
+    logger.info(`[getRoomConfig] Global config characters before override:`, {
+        selectedCharacter: liveConfig.promptConfig.selectedCharacter,
+        selectedCharacters: liveConfig.promptConfig.selectedCharacters
+    });
+
+    // Apply room-specific overrides (character selection, API, etc.)
+    if (roomSettings.selectedCharacter) {
+        roomConfig.promptConfig.selectedCharacter = roomSettings.selectedCharacter;
+        roomConfig.promptConfig.selectedCharacterDisplayName = roomSettings.selectedCharacterDisplayName || roomSettings.selectedCharacter;
+        logger.info(`[getRoomConfig] Applied selectedCharacter override: ${roomSettings.selectedCharacter}`);
+    }
+    if (roomSettings.selectedCharacters) {
+        roomConfig.promptConfig.selectedCharacters = roomSettings.selectedCharacters;
+        logger.info(`[getRoomConfig] Applied selectedCharacters override:`, JSON.stringify(roomSettings.selectedCharacters));
+    }
+    if (roomSettings.selectedAPI) {
+        roomConfig.promptConfig.selectedAPI = roomSettings.selectedAPI;
+        logger.info(`[getRoomConfig] Applied selectedAPI override: ${roomSettings.selectedAPI}`);
+    }
+
+    logger.info(`[getRoomConfig] Final room config for ${roomId}:`, {
+        selectedCharacter: roomConfig.promptConfig.selectedCharacter,
+        selectedCharacters: roomConfig.promptConfig.selectedCharacters,
+        selectedAPI: roomConfig.promptConfig.selectedAPI
+    });
+
+    // Cache the merged config
+    roomConfigs.set(roomId, roomConfig);
+
+    return roomConfig;
 }
 
 /**
  * Update room configuration
  * @param {string} roomId - Room ID
- * @param {object} config - New configuration
+ * @param {object} config - New configuration (can be full liveConfig or partial settings)
  */
 async function setRoomConfig(roomId, config) {
+    // Cache the full config
     roomConfigs.set(roomId, config);
-    await db.updateRoomSettings(roomId, { settings: config });
+
+    // Extract room-specific settings to store in DB (not the entire liveConfig)
+    const roomSpecificSettings = {
+        selectedCharacter: config.promptConfig?.selectedCharacter,
+        selectedCharacterDisplayName: config.promptConfig?.selectedCharacterDisplayName,
+        selectedCharacters: config.promptConfig?.selectedCharacters,
+        selectedAPI: config.promptConfig?.selectedAPI // Save API selection per room
+    };
+
+    logger.info(`[setRoomConfig] Storing for room ${roomId}:`, JSON.stringify(roomSpecificSettings));
+
+    // Store only room-specific overrides in database
+    await db.updateRoomSettings(roomId, { settings: roomSpecificSettings });
 }
 
 function delay(ms) {
@@ -1206,7 +1297,16 @@ async function handleConnections(ws, type, request) {
     if (user) {
         thisUserColor = user.username_color;
         thisUserUsername = user.username;
-        thisUserRole = user.role;
+        // Get role from user_roles table
+        const roleResult = await db.pool.query('SELECT role FROM user_roles WHERE user_id = $1', [uuid]);
+        thisUserRole = roleResult.rows[0]?.role || type;
+
+        // Update role in database if it differs from connection type (host server should always be host)
+        if (type === 'host' && thisUserRole !== 'host') {
+            await db.upsertUserRole(uuid, 'host');
+            thisUserRole = 'host';
+            logger.info(`Updated ${thisUserUsername} to host role (connected to host server)`);
+        }
     } else { //make new values for new users
         thisUserColor = usernameColors[Math.floor(Math.random() * usernameColors.length)];
         thisUserUsername = decodedUsername;
@@ -1262,17 +1362,18 @@ async function handleConnections(ws, type, request) {
         role: thisUserRole,
         selectedCharacterDisplayName: liveConfig.promptConfig?.selectedCharacterDisplayName,
         userList: connectedUsers,
+        persona: user?.persona || '', // Include persona in connection message
         /*         liveConfig: {
                     crowdControl: {
                         userChatDelay: liveConfig?.crowdControl?.userChatDelay || "2",
                         AIChatDelay: liveConfig?.crowdControl?.AIChatDelay || "2",
                         allowImages: liveConfig?.crowdControl?.allowImages || false,
                         guestInputPermissionState: liveConfig?.crowdControl?.guestInputPermissionState || true
-        
+
                     }
                 }, */
         crowdControl: liveConfig.crowdControl,
-        selectedModelForGuestDisplay: liveConfig.APIConfig.selectedModel
+        selectedModelForGuestDisplay: liveConfig.APIConfig?.selectedModel || 'No model selected'
     };
 
     if (thisUserRole === 'host') {
@@ -1374,6 +1475,13 @@ async function handleConnections(ws, type, request) {
                 if (user) user.persona = parsedMessage.persona;
                 updateConnectedUsers();
                 await broadcastUserList();
+
+                // Send confirmation back to the user
+                ws.send(JSON.stringify({
+                    type: 'personaUpdateConfirm',
+                    persona: parsedMessage.persona,
+                    success: true
+                }));
                 return;
             }
 
@@ -1382,44 +1490,86 @@ async function handleConnections(ws, type, request) {
                 if (parsedMessage.type === 'clientStateChange') {
                     logger.info('Received updated liveConfig from Host client...')
 
+                    const currentRoomId = getWsRoom(ws);
+                    logger.info(`[clientStateChange] Room context: ${currentRoomId || 'NONE (global)'}`);
+
                     logger.info('Checking APIList for changes..')
                     await checkAPIListChanges(liveConfig, parsedMessage)
 
-                    logger.info('writing liveConfig to file')
-                    liveConfig = parsedMessage.value
+                    // Store the updated config
+                    const updatedConfig = parsedMessage.value;
+
                     // After processing API list changes, refresh APIConfig and APIList from DB to avoid dropping fields (e.g., useTokenizer)
                     try {
-                        const selected = liveConfig?.promptConfig?.selectedAPI || 'Default';
+                        const selected = updatedConfig?.promptConfig?.selectedAPI || 'Default';
                         const refreshed = await db.getAPI(selected);
                         if (refreshed) {
-                            liveConfig.APIConfig = refreshed;
+                            updatedConfig.APIConfig = refreshed;
                         }
-                        liveConfig.promptConfig.APIList = await db.getAPIs();
+                        updatedConfig.promptConfig.APIList = await db.getAPIs();
                     } catch (e) {
                         logger.warn('Failed to refresh APIConfig/APIList after clientStateChange:', e.message);
                     }
+
                     // Migrate / validate multi-character schema
-                    migrateSelectedCharactersIfNeeded(liveConfig)
-                    await fio.writeConfig(liveConfig)
-                    logger.info('broadcasting new liveconfig to all hosts')
-                    let hostStateChangeMessage = {
-                        type: 'hostStateChange',
-                        value: liveConfig
-                    }
-                    await broadcast(hostStateChangeMessage, 'host');
+                    migrateSelectedCharactersIfNeeded(updatedConfig)
 
-                    let guestStateMessage = {
-                        type: "guestStateChange",
-                        state: {
-                            selectedCharacter: liveConfig.promptConfig.selectedCharacterDisplayName,
-                            userChatDelay: liveConfig.crowdControl.userChatDelay,
-                            AIChatDelay: liveConfig.crowdControl.AIChatDelay,
-                            allowImages: liveConfig.crowdControl.allowImages,
-                            selectedModelForGuestDisplay: liveConfig.APIConfig.selectedModel
+                    if (currentRoomId) {
+                        // Store config in room-specific storage
+                        logger.info(`[clientStateChange] Storing config for room ${currentRoomId}`)
+                        logger.info(`[clientStateChange] Character data being saved:`, {
+                            selectedCharacter: updatedConfig.promptConfig?.selectedCharacter,
+                            selectedCharacterDisplayName: updatedConfig.promptConfig?.selectedCharacterDisplayName,
+                            selectedCharacters: updatedConfig.promptConfig?.selectedCharacters
+                        });
+                        await setRoomConfig(currentRoomId, updatedConfig);
+
+                        // Broadcast to room members only
+                        logger.info('Broadcasting new config to room hosts')
+                        let hostStateChangeMessage = {
+                            type: 'hostStateChange',
+                            value: updatedConfig,
+                            roomId: currentRoomId
                         }
+                        await broadcastToRoom(currentRoomId, hostStateChangeMessage, 'host');
 
+                        let guestStateMessage = {
+                            type: "guestStateChange",
+                            state: {
+                                selectedCharacter: updatedConfig.promptConfig.selectedCharacterDisplayName,
+                                userChatDelay: updatedConfig.crowdControl.userChatDelay,
+                                AIChatDelay: updatedConfig.crowdControl.AIChatDelay,
+                                allowImages: updatedConfig.crowdControl.allowImages,
+                                selectedModelForGuestDisplay: updatedConfig.APIConfig.selectedModel
+                            },
+                            roomId: currentRoomId
+                        }
+                        await broadcastToRoom(currentRoomId, guestStateMessage, 'guest');
+                    } else {
+                        // Global config update (fallback for backward compatibility)
+                        logger.info('writing global liveConfig to file')
+                        liveConfig = updatedConfig;
+                        await fio.writeConfig(liveConfig)
+
+                        logger.info('broadcasting new liveconfig to all hosts')
+                        let hostStateChangeMessage = {
+                            type: 'hostStateChange',
+                            value: liveConfig
+                        }
+                        await broadcast(hostStateChangeMessage, 'host');
+
+                        let guestStateMessage = {
+                            type: "guestStateChange",
+                            state: {
+                                selectedCharacter: liveConfig.promptConfig.selectedCharacterDisplayName,
+                                userChatDelay: liveConfig.crowdControl.userChatDelay,
+                                AIChatDelay: liveConfig.crowdControl.AIChatDelay,
+                                allowImages: liveConfig.crowdControl.allowImages,
+                                selectedModelForGuestDisplay: liveConfig.APIConfig?.selectedModel || 'No model selected'
+                            }
+                        }
+                        await broadcast(guestStateMessage, 'guest');
                     }
-                    await broadcast(guestStateMessage, 'guest');
                     return
                 }
                 else if (parsedMessage.type === 'requestAIResponse') {
@@ -1428,14 +1578,28 @@ async function handleConnections(ws, type, request) {
                 }
                 else if (parsedMessage.type === 'modelSelect') {
                     const selectedModel = parsedMessage.value;
+                    if (!liveConfig.APIConfig) {
+                        logger.warn('Cannot change model: No API configured');
+                        return;
+                    }
                     logger.info(`Changing selected model for ${liveConfig.APIConfig.name} to ${selectedModel}..`)
                     liveConfig.APIConfig.selectedModel = selectedModel;
                     await db.upsertAPI(liveConfig.APIConfig);
                     liveConfig.promptConfig.APIList = await db.getAPIs();
                     await fio.writeConfig(liveConfig);
+
+                    // Get room-specific config if in a room, otherwise use global
+                    const currentRoomId = getWsRoom(ws);
+                    let configToSend = liveConfig;
+                    if (currentRoomId) {
+                        configToSend = await getRoomConfig(currentRoomId);
+                        // Ensure the updated APIList is included
+                        configToSend.promptConfig.APIList = liveConfig.promptConfig.APIList;
+                    }
+
                     const settingChangeMessage = {
                         type: 'hostStateChange',
-                        value: liveConfig
+                        value: configToSend
                     };
                     const selectedModelForGuestDisplay = {
                         type: 'modelChangeForGuests',
@@ -1479,9 +1643,18 @@ async function handleConnections(ws, type, request) {
                             liveConfig.promptConfig.APIList = await db.getAPIs();
                             await fio.writeConfig(liveConfig);
 
+                            // Get room-specific config if in a room, otherwise use global
+                            const currentRoomId = getWsRoom(ws);
+                            let configToSend = liveConfig;
+                            if (currentRoomId) {
+                                configToSend = await getRoomConfig(currentRoomId);
+                                // Ensure the updated APIList is included
+                                configToSend.promptConfig.APIList = liveConfig.promptConfig.APIList;
+                            }
+
                             modelListResult = {
                                 type: 'hostStateChange',
-                                value: liveConfig
+                                value: configToSend
                             };
                         } else {
                             modelListResult = {
@@ -1559,10 +1732,12 @@ async function handleConnections(ws, type, request) {
                             }
 
                             // Get room config for characters (if in room) or global config
-                            const configToUse = timerRoomId ? await getRoomConfig(timerRoomId) : liveConfig.promptConfig;
-                            migrateSelectedCharactersIfNeeded(liveConfig);
-                            const scArr = (configToUse.selectedCharacters || liveConfig.promptConfig.selectedCharacters || [])
-                                .filter(c => c.value && c.value !== 'None' && !c.isMuted);
+                            const configToUse = timerRoomId ? await getRoomConfig(timerRoomId) : liveConfig;
+                            migrateSelectedCharactersIfNeeded(configToUse);
+                            // Note: We don't filter out muted characters here - they should still seed first messages
+                            // Muting only prevents auto-responses during chat, not initial greetings
+                            const scArr = (configToUse.promptConfig?.selectedCharacters || [])
+                                .filter(c => c.value && c.value !== 'None');
                             if (scArr.length === 0) {
                                 logger.warn('[ClearAIChat] No active characters to seed first messages.');
                             }
@@ -1774,6 +1949,17 @@ async function handleConnections(ws, type, request) {
                         return;
                     }
 
+                    // Get room context for room-aware config
+                    const currentRoomId = getWsRoom(ws);
+                    logger.info(`[continueFromMessage] Room context: ${currentRoomId || 'NONE (global)'}`);
+
+                    // Load room-specific config or use global
+                    let configToUse = liveConfig;
+                    if (currentRoomId) {
+                        configToUse = await getRoomConfig(currentRoomId);
+                        logger.info(`[continueFromMessage] Using room config for room ${currentRoomId}`);
+                    }
+
                     // Load target message to identify character and validate it's AI
                     const targetRow = await db.getAIChatMessageRow(targetMesID, sessionID);
                     if (!targetRow || targetRow.entity !== 'AI') {
@@ -1782,24 +1968,33 @@ async function handleConnections(ws, type, request) {
                     }
 
                     // Identify character entry by displayName
-                    migrateSelectedCharactersIfNeeded(liveConfig);
-                    const scArr = liveConfig.promptConfig.selectedCharacters || [];
+                    migrateSelectedCharactersIfNeeded(configToUse);
+                    const scArr = configToUse.promptConfig.selectedCharacters || [];
                     const targetDisplay = (targetRow.username || '').trim();
+                    logger.info(`[continueFromMessage] Looking for character: "${targetDisplay}" in ${scArr.length} selected characters`);
+
                     let targetEntry = scArr.find(c => (c.displayName || '').trim() === targetDisplay);
+
                     // If not found among active selections, search the full card list on disk
                     if (!targetEntry) {
+                        logger.warn(`[continueFromMessage] Character "${targetDisplay}" not in active selections, searching card list`);
                         try {
                             const cardList = await fio.getCardList();
                             const found = (cardList || []).find(c => (c.name || '').trim() === targetDisplay);
                             if (found) {
                                 targetEntry = { value: found.value, displayName: found.name, isMuted: false };
+                                logger.info(`[continueFromMessage] Found character in card list: ${found.name}`);
                             }
                         } catch (e) {
                             logger.warn('[Continue] Failed to load card list while resolving character:', e.message);
                         }
+                    } else {
+                        logger.info(`[continueFromMessage] Found character in active selections: ${targetEntry.displayName}`);
                     }
+
                     if (!targetEntry) {
                         // Send a targeted prompt to the requesting host to allow continuation without defs
+                        logger.warn(`[continueFromMessage] Character "${targetDisplay}" not found anywhere, prompting for continuation without defs`);
                         ws.send(JSON.stringify({
                             type: 'continueMissingCharDefs',
                             targetDisplay,
@@ -1818,15 +2013,20 @@ async function handleConnections(ws, type, request) {
                         character: { value: targetEntry.value, displayName: targetEntry.displayName },
                         username: originatingUser,
                         // Special continuation targeting metadata
-                        continueTarget: { sessionID, mesID: targetMesID }
+                        continueTarget: { sessionID, mesID: targetMesID },
+                        roomId: currentRoomId // Include room context
                     };
 
                     // Bypass full queue; directly invoke single-character pipeline with shouldContinue true
-                    liveConfig.promptConfig.selectedCharacter = targetEntry.value;
-                    liveConfig.promptConfig.selectedCharacterDisplayName = targetEntry.displayName;
+                    // Use room-specific config, not global
+                    configToUse.promptConfig.selectedCharacter = targetEntry.value;
+                    configToUse.promptConfig.selectedCharacterDisplayName = targetEntry.displayName;
+
+                    logger.info(`[continueFromMessage] Invoking continuation for ${targetEntry.displayName} in room ${currentRoomId || 'global'}`);
+
                     await stream.handleResponse(
                         { ...continueMsg, chatID: 'AIChat' }, selectedAPI, hordeKey,
-                        engineMode, user, liveConfig, true, sessionID
+                        engineMode, user, configToUse, true, sessionID
                     );
                     return;
                 }
@@ -1945,9 +2145,12 @@ async function handleConnections(ws, type, request) {
                     const sessionID = parsedMessage.sessionID;
                     
                     // Validate session belongs to current room
-                    const sessionInfo = await db.getSessionRoom(sessionID);
-                    if (currentRoomId && sessionInfo && sessionInfo.room_id !== currentRoomId) {
-                        logger.warn(`[pastChatDelete] User tried to delete session ${sessionID} from different room`);
+                    const sessionRoomId = await db.getSessionRoom(sessionID);
+                    logger.debug(`[pastChatDelete] Session ${sessionID} room: ${sessionRoomId}, Current room: ${currentRoomId}`);
+
+                    // Check if trying to delete a session from a different room
+                    if (currentRoomId && sessionRoomId !== null && sessionRoomId !== currentRoomId) {
+                        logger.warn(`[pastChatDelete] User tried to delete session ${sessionID} (room: ${sessionRoomId}) from different room (${currentRoomId})`);
                         ws.send(JSON.stringify({
                             type: 'roomError',
                             message: 'Cannot delete chat from a different room',
@@ -2203,19 +2406,22 @@ async function handleConnections(ws, type, request) {
                 }
                 
                 try {
-                    const room = await db.createRoom(
+                    const roomId = await db.createRoom(
                         name.trim(),
                         description || '',
                         uuid,
                         {} // Initial settings (empty, uses global defaults)
                     );
-                    
+
+                    // Fetch the full room object
+                    const room = await db.getRoomById(roomId);
+
                     // Associate this WebSocket with the new room
-                    setWsRoom(ws, room.room_id, uuid);
-                    
+                    setWsRoom(ws, roomId, uuid);
+
                     // Get room's active session for chat history
-                    const sessionId = await db.getRoomActiveSession(room.room_id, 'ai');
-                    
+                    const sessionId = await db.getRoomActiveSession(roomId, 'ai');
+
                     ws.send(JSON.stringify({
                         type: 'roomCreated',
                         room: room,
@@ -2295,21 +2501,36 @@ async function handleConnections(ws, type, request) {
                     
                     // Get room's chat history
                     const sessionId = await db.getRoomActiveSession(roomId, 'ai');
+                    logger.info(`[joinRoom] Active AI session for room ${roomId}: ${sessionId}`);
                     let chatHistory = [];
                     if (sessionId) {
                         const [chatData] = await db.readAIChat(sessionId);
                         chatHistory = JSON.parse(chatData || '[]');
+                        logger.info(`[joinRoom] Loaded ${chatHistory.length} AI chat messages for session ${sessionId}`);
+                    } else {
+                        logger.warn(`[joinRoom] No active AI session found for room ${roomId}`);
                     }
-                    
+
                     // Get room's user chat history
-                    // TODO: Add room-scoped user chat reading
-                    
+                    const userSessionId = await db.getRoomActiveSession(roomId, 'user');
+                    let userChatHistory = [];
+                    if (userSessionId) {
+                        const [userChatData] = await db.readUserChat(userSessionId);
+                        userChatHistory = JSON.parse(userChatData || '[]');
+                    }
+
                     // Get room config
                     const roomConfig = await getRoomConfig(roomId);
-                    
+
+                    // Ensure cardList is included in the room config (needed for character selector population)
+                    if (!roomConfig.promptConfig.cardList) {
+                        roomConfig.promptConfig.cardList = cardList || await fio.getCardList();
+                    }
+
                     // Get room's past chats for the control panel
                     const pastChats = await db.getPastChats('ai', roomId);
-                    
+                    logger.info(`[joinRoom] Found ${Object.keys(pastChats).length} past AI chats for room ${roomId}`);
+
                     ws.send(JSON.stringify({
                         type: 'roomJoined',
                         room: {
@@ -2325,6 +2546,7 @@ async function handleConnections(ws, type, request) {
                             role: m.role
                         })),
                         chatHistory: markdownifyChatHistoriesArray(chatHistory),
+                        userChatHistory: userChatHistory,
                         sessionId: sessionId,
                         config: roomConfig,
                         pastChats: pastChats // Include room-specific past chats
@@ -2789,6 +3011,7 @@ async function handleConnections(ws, type, request) {
                             latestUserMessageText: parsedMessage.userInput || '',
                             latestUserMessageID: userPrompt?.messageID,
                             mesID: userPrompt?.messageID,
+                            sessionID: sessionID, // Pass session ID from readAIChat (line 2925)
                             username: username, // preserve user name for macro replacement
                             roomId: currentRoomId // Include room context for AI response
                         };
@@ -3038,6 +3261,60 @@ function isAPIEqual(api1, api2) {
     }
     return true;
 }
+
+// Admin helper functions accessible from console
+global.makeUserHost = async function(username) {
+    try {
+        const user = await db.getUserByUsername(username);
+        if (!user) {
+            console.log(`❌ User '${username}' not found`);
+            return false;
+        }
+        await db.upsertUserRole(user.user_id, 'host');
+        console.log(`✅ User '${username}' is now a host`);
+        return true;
+    } catch (err) {
+        console.error('❌ Error making user host:', err);
+        return false;
+    }
+};
+
+global.makeAllUsersHost = async function() {
+    try {
+        const users = await db.pool.query('SELECT user_id, username FROM users');
+        for (const user of users.rows) {
+            await db.upsertUserRole(user.user_id, 'host');
+            console.log(`✅ ${user.username} is now a host`);
+        }
+        console.log(`✅ All ${users.rows.length} users are now hosts`);
+        return true;
+    } catch (err) {
+        console.error('❌ Error making all users host:', err);
+        return false;
+    }
+};
+
+global.listUsers = async function() {
+    try {
+        const result = await db.pool.query(`
+            SELECT u.username, ur.role
+            FROM users u
+            LEFT JOIN user_roles ur ON u.user_id = ur.user_id
+            ORDER BY u.created_at
+        `);
+        console.log('\n📋 Users:');
+        console.table(result.rows);
+        return result.rows;
+    } catch (err) {
+        console.error('❌ Error listing users:', err);
+        return [];
+    }
+};
+
+console.log('\n💡 Admin commands available:');
+console.log('   makeUserHost("username")  - Make a specific user a host');
+console.log('   makeAllUsersHost()        - Make all users hosts');
+console.log('   listUsers()               - List all users and their roles\n');
 
 // Handle server shutdown via ctrl+c
 process.on('SIGINT', async () => {

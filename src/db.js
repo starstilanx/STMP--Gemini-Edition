@@ -1364,33 +1364,71 @@ async function getUserByUsername(username) {
 // Register a new user with password
 async function registerUser(username, password, email = null) {
     logger.info('Registering new user: ' + username);
-    
+
     // Check if username is already taken
     const existing = await getUserByUsername(username);
     if (existing) {
-        logger.warn('Username already taken: ' + username);
+        // If user exists but has no password (guest account), upgrade them to registered account
+        if (!existing.password_hash) {
+            logger.info('Upgrading guest account to registered account: ' + username);
+            return queueDatabaseWrite(async (db) => {
+                try {
+                    const password_hash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
+                    const updated_at = new Date().toISOString();
+
+                    // Update existing user with password and email
+                    await db.run(
+                        `UPDATE users
+                         SET password_hash = ?, email = ?, last_seen_at = ?
+                         WHERE user_id = ?`,
+                        [password_hash, email, updated_at, existing.user_id]
+                    );
+
+                    logger.info('Guest account upgraded successfully: ' + username + ' (ID: ' + existing.user_id + ')');
+                    return {
+                        success: true,
+                        user: {
+                            user_id: existing.user_id,
+                            username: existing.username,
+                            username_color: existing.username_color,
+                            persona: existing.persona || '',
+                            email,
+                            role: existing.role || 'user',
+                            created_at: existing.created_at
+                        }
+                    };
+                } catch (err) {
+                    logger.error('Error upgrading guest account:', err);
+                    return { success: false, error: 'Database error during registration' };
+                }
+            }, []);
+        }
+
+        // User exists with password - truly already taken
+        logger.warn('Username already taken (registered account): ' + username);
         return { success: false, error: 'Username already taken' };
     }
-    
+
+    // Create new user
     return queueDatabaseWrite(async (db) => {
         try {
             const user_id = generateAuthUUID();
             const password_hash = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
             const username_color = '#' + Math.floor(Math.random()*16777215).toString(16).padStart(6, '0');
             const created_at = new Date().toISOString();
-            
+
             await db.run(
-                `INSERT INTO users (user_id, username, username_color, persona, password_hash, email, created_at, last_seen_at) 
+                `INSERT INTO users (user_id, username, username_color, persona, password_hash, email, created_at, last_seen_at)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
                 [user_id, username, username_color, '', password_hash, email, created_at, created_at]
             );
-            
+
             // Also create user_roles entry with default 'user' role
             await db.run('INSERT INTO user_roles (user_id, role) VALUES (?, ?)', [user_id, 'user']);
-            
+
             logger.info('User registered successfully: ' + username + ' (ID: ' + user_id + ')');
-            return { 
-                success: true, 
+            return {
+                success: true,
                 user: {
                     user_id,
                     username,
@@ -1526,8 +1564,15 @@ async function getRoomById(roomId) {
     const db = await dbPromise;
     try {
         const room = await db.get('SELECT * FROM rooms WHERE room_id = ? AND is_active = TRUE', [roomId]);
+        if (room) {
+            logger.info(`[getRoomById] Raw room data for ${roomId}:`, {
+                name: room.name,
+                settings_raw: room.settings
+            });
+        }
         if (room && room.settings) {
             room.settings = JSON.parse(room.settings);
+            logger.info(`[getRoomById] Parsed settings for ${roomId}:`, JSON.stringify(room.settings));
         }
         return room;
     } catch (err) {
@@ -1579,14 +1624,19 @@ async function getAllActiveRooms() {
  */
 async function updateRoomSettings(roomId, updates) {
     logger.info(`Updating room settings: ${roomId}`);
-    
+
     return queueDatabaseWrite(async (db) => {
         const { name, description, settings } = updates;
-        
+
+        // Log what we're about to save
+        if (settings !== undefined) {
+            logger.info(`[updateRoomSettings] Settings to save for room ${roomId}:`, JSON.stringify(settings));
+        }
+
         // Build dynamic update query
         const setClauses = [];
         const params = [];
-        
+
         if (name !== undefined) {
             setClauses.push('name = ?');
             params.push(name);

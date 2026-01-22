@@ -99,8 +99,8 @@ async function getAIResponse(isStreaming, hordeKey, engineMode, user, liveConfig
             }
         } catch (_) { /* noop */ }
 
-        // Pass roomId for room-scoped chat history
-        const [fullPrompt, includedChatObjects, lastInContextMessageID] = await addCharDefsToPrompt(liveConfig, charFile, formattedCharName, parsedMessage.username, liveAPI, shouldContinue, continueTarget, user.persona, parsedMessage?.roomId);
+        // Pass sessionID and roomId for room-scoped chat history
+        const [fullPrompt, includedChatObjects, lastInContextMessageID] = await addCharDefsToPrompt(liveConfig, charFile, formattedCharName, parsedMessage.username, liveAPI, shouldContinue, continueTarget, user.persona, parsedMessage?.roomId, parsedMessage?.sessionID);
         const samplerData = await fio.readFile(liveConfig.promptConfig.selectedSamplerPreset);
         const samplers = JSON.parse(samplerData);
         //logger.info('[getAIResponse] >> samplers:', samplerData)
@@ -289,11 +289,11 @@ function trimIncompleteSentences(input, include_newline = false) {
     return s.trimEnd();
 }
 
-async function ObjectifyChatHistory(roomId = null) {
+async function ObjectifyChatHistory(roomId = null, sessionID = null) {
     return new Promise(async (resolve, reject) => {
         await delay(100)
-        // Pass roomId for room-scoped chat reading
-        let [data, sessionID] = await db.readAIChat(null, roomId);
+        // Pass sessionID (if provided) and roomId for room-scoped chat reading
+        let [data, actualSessionID] = await db.readAIChat(sessionID, roomId);
         try {
             // Parse the existing contents as a JSON array
             let chatHistory = JSON.parse(data);
@@ -531,7 +531,7 @@ async function buildTCPrompt({
 // this function does a lot more than just add character definitions to the prompt.
 // it also crafts the entire prompt, including system message, dynamic insertions, chat history, and the last user message.
 // it contains methods for TC and CC; this really should be split up somehow.
-async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharName, username, liveAPI, shouldContinue, continueTarget = null, userPersona = '', roomId = null) {
+async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharName, username, liveAPI, shouldContinue, continueTarget = null, userPersona = '', roomId = null, sessionID = null) {
     //logger.debug(`[addCharDefsToPrompt] >> GO`)
     //logger.debug(liveAPI)
     let isClaude = liveAPI.claude
@@ -563,8 +563,8 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
                 // Minimal stub to allow macro replacement without pulling defs
                 charData = JSON.stringify({ name: liveConfig.promptConfig.selectedCharacterDisplayName || 'Character', description: '', data: { name: liveConfig.promptConfig.selectedCharacterDisplayName || 'Character', description: '', first_mes: '' } });
             }
-            // Pass roomId for room-scoped chat history
-            let chatHistory = await ObjectifyChatHistory(roomId)
+            // Pass sessionID (if provided) and roomId for room-scoped chat history
+            let chatHistory = await ObjectifyChatHistory(roomId, sessionID)
             if (continueTarget && continueTarget.sessionID) {
                 // Truncate chat history to include only messages up to and including the target mesID
                 try {
@@ -1509,6 +1509,11 @@ async function tryLoadModel(api, liveConfig, liveAPI) {
 
     logger.info(`[tryLoadModel] >> GO`)
 
+    if (!liveConfig.APIConfig) {
+        logger.warn('[tryLoadModel] No API configured');
+        return { success: false, error: 'No API configured' };
+    }
+
     let isClaude = api.isClaude
     let modelLoadEndpoint = api.endpoint
     let selectedModel = liveConfig.APIConfig.selectedModel
@@ -1667,7 +1672,15 @@ async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, include
         }
         
         logger.info('Detected Gemini API, converting request format...');
-        
+
+        // Log the messages array for debugging
+        logger.info(`[Gemini] Messages array type: ${Array.isArray(finalApiCallParams.messages) ? 'array' : typeof finalApiCallParams.messages}`);
+        logger.info(`[Gemini] Messages count: ${finalApiCallParams.messages?.length || 0}`);
+        if (finalApiCallParams.messages && finalApiCallParams.messages.length > 0) {
+            logger.info(`[Gemini] First message: ${JSON.stringify(finalApiCallParams.messages[0])}`);
+            logger.info(`[Gemini] Last message: ${JSON.stringify(finalApiCallParams.messages[finalApiCallParams.messages.length - 1])}`);
+        }
+
         // Build Gemini-specific endpoint URL
         // Format: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=API_KEY
         // Or for streaming: :streamGenerateContent?alt=sse&key=API_KEY
@@ -1676,7 +1689,7 @@ async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, include
             // If using a proxy, construct the URL differently
             geminiBaseURL = baseURL;
         }
-        
+
         const streamSuffix = isStreaming ? ':streamGenerateContent?alt=sse' : ':generateContent?';
         if (geminiBaseURL.includes('generativelanguage.googleapis.com')) {
             chatURL = `${geminiBaseURL}models/${selectedModel}${streamSuffix}&key=${key}`;
@@ -1684,13 +1697,13 @@ async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, include
             // For proxy endpoints, assume they handle the routing
             chatURL = baseURL + (isStreaming ? 'stream' : 'generate');
         }
-        
+
         // Convert OpenAI-style messages to Gemini format
         // Gemini format: { contents: [{ role: "user", parts: [{ text: "..." }] }] }
         const geminiContents = [];
         let systemInstruction = null;
-        
-        if (Array.isArray(finalApiCallParams.messages)) {
+
+        if (Array.isArray(finalApiCallParams.messages) && finalApiCallParams.messages.length > 0) {
             for (const msg of finalApiCallParams.messages) {
                 if (msg.role === 'system') {
                     // Gemini uses systemInstruction for system prompts
@@ -1709,7 +1722,30 @@ async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, include
                 }
             }
         }
-        
+
+        // Gemini requires at least one user/model message in contents
+        // If we only have system messages, we need to add a placeholder
+        if (geminiContents.length === 0) {
+            logger.warn('[Gemini] No user/assistant messages found, only system messages. Adding placeholder user message.');
+            // Add a minimal user message to satisfy Gemini's requirement
+            geminiContents.push({
+                role: 'user',
+                parts: [{ text: 'Continue.' }]
+            });
+        }
+
+        // Gemini requires the last message to be from user role (not model/assistant)
+        // If the last message is from model, add a continuation prompt
+        if (geminiContents.length > 0 && geminiContents[geminiContents.length - 1].role === 'model') {
+            logger.warn('[Gemini] Last message is from model role. Adding user continuation prompt.');
+            geminiContents.push({
+                role: 'user',
+                parts: [{ text: 'Continue.' }]
+            });
+        }
+
+        logger.info(`[Gemini] Built ${geminiContents.length} content entries for request`);
+
         // Build Gemini request body
         const geminiParams = {
             contents: geminiContents,
@@ -1720,25 +1756,25 @@ async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, include
                 topK: finalApiCallParams.top_k || 40,
             }
         };
-        
+
         // Add system instruction if present
         if (systemInstruction) {
             geminiParams.systemInstruction = systemInstruction;
         }
-        
+
         // Add stop sequences if present
         if (finalApiCallParams.stop && Array.isArray(finalApiCallParams.stop) && finalApiCallParams.stop.length > 0) {
             geminiParams.generationConfig.stopSequences = finalApiCallParams.stop.slice(0, 5); // Gemini supports up to 5
         }
-        
+
         // Replace the params with Gemini format
         finalApiCallParams = geminiParams;
-        
+
         // Gemini doesn't use Authorization header for API key (it's in the URL)
         headers = {
             'Content-Type': 'application/json',
         };
-        
+
         logger.info(`Gemini request URL: ${chatURL}`);
     }
 

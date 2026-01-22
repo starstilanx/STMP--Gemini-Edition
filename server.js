@@ -7,6 +7,7 @@ import WebSocket from 'ws';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import express from 'express';
+import cors from 'cors'; // Added CORS support
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -24,6 +25,9 @@ const existsAsync = promisify(fs.exists);
 const localApp = express();
 const remoteApp = express();
 const mobileApp = express(); // NEW
+localApp.use(cors()); // Enable CORS for local app
+remoteApp.use(cors()); // Enable CORS for remote app
+mobileApp.use(cors()); // Enable CORS for mobile app
 localApp.use(express.static('public'));
 remoteApp.use(express.static('public'));
 mobileApp.use(express.static('public')); // NEW
@@ -289,7 +293,7 @@ async function handleRequestAIResponse(parsedMessage, user, selectedAPI, hordeKe
             logger.info(`[Room] Using room ${roomId} character: ${liveConfig.promptConfig.selectedCharacterDisplayName}`);
         }
     }
-    
+
     migrateSelectedCharactersIfNeeded(liveConfig);
     const trigger = parsedMessage.trigger || 'auto';
     const isManualOrContinue = trigger === 'manual';
@@ -439,63 +443,23 @@ async function resolveUsernameHint(parsedMessage, user) {
     return ai;
 }
 
+import dbRouter from './src/db_routes.js'; // Import the new router
+
 //MARK: Routes
 
-// NEW: Database access endpoint
-localApp.get('/api/db/:table', async (req, res) => {
-    const tableName = req.params.table;
-    try {
-        const data = await db.getTableData(tableName);
-        res.json(data);
-    } catch (err) {
-        if (err.message === 'Invalid table name') {
-            res.status(400).json({ error: 'Invalid table name' });
-        } else {
-            logger.error(`Error querying table ${tableName}:`, err);
-            res.status(500).json({ error: 'Internal server error' });
-        }
-    }
-});
+// Mount the DB router at /api/db
+// This provides:
+//   /api/db/universal/:table
+//   /api/db/users
+//   /api/db/aichats
+//   ... and all other tables
+localApp.use('/api/db', dbRouter);
 
-// Restored: Custom endpoints requested by user
-localApp.get('/api/aichats', async (req, res) => {
-    const chatId = req.query.chat_id;
-    // Using Postgres syntax ($1)
-    const sql = `SELECT * FROM aichats WHERE session_id = $1 ORDER BY created_at DESC LIMIT 50`;
-
-    try {
-        const result = await db.query(sql, [chatId]);
-        res.json(result.rows.reverse()); // Send array of messages
-    } catch (err) {
-        logger.error('Error in /api/aichats:', err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
-localApp.get('/api/users/:user_id', async (req, res) => {
-    const userId = req.params.user_id;
-
-    const sql = `
-    SELECT 
-      user_id, 
-      username, 
-      username_color, 
-      persona, 
-      created_at 
-    FROM users 
-    WHERE user_id = $1
-  `;
-
-    try {
-        const result = await db.query(sql, [userId]);
-        const row = result.rows[0];
-        if (!row) return res.status(404).json({ error: "User not found" });
-        res.json(row);
-    } catch (err) {
-        logger.error('Error in /api/users:', err);
-        res.status(500).json({ error: err.message });
-    }
-});
+/* REMOVED: Replaced by dedicated db_routes.js
+localApp.get('/api/db/:table', ...);
+localApp.get('/api/db/aichats', ...);
+localApp.get('/api/db/users/:user_id', ...);
+*/
 
 localApp.get('/', async (req, res) => {
     const filePath = path.join(__dirname, 'public/client.html');
@@ -621,16 +585,16 @@ function setWsRoom(ws, roomId, userId) {
         roomsState.get(prevRoom).delete(ws);
         logger.info(`[Room] User ${userId} left room ${prevRoom}`);
     }
-    
+
     // Add to new room
     wsToRoom.set(ws, roomId);
     wsToUser.set(ws, userId);
-    
+
     if (!roomsState.has(roomId)) {
         roomsState.set(roomId, new Set());
     }
     roomsState.get(roomId).add(ws);
-    
+
     // Verify the mapping was set
     const verifyRoom = wsToRoom.get(ws);
     logger.info(`[Room] User ${userId} joined room ${roomId}. Verified wsToRoom: ${verifyRoom}`);
@@ -643,12 +607,12 @@ function setWsRoom(ws, roomId, userId) {
 function removeWsFromRoom(ws) {
     const roomId = wsToRoom.get(ws);
     const userId = wsToUser.get(ws);
-    
+
     if (roomId && roomsState.has(roomId)) {
         roomsState.get(roomId).delete(ws);
         logger.info(`[Room] User ${userId} left room ${roomId}`);
     }
-    
+
     // WeakMap entries will be garbage collected automatically
 }
 
@@ -670,14 +634,14 @@ async function getRoomConfig(roomId) {
     if (roomConfigs.has(roomId)) {
         return roomConfigs.get(roomId);
     }
-    
+
     // Load from database
     const room = await db.getRoomById(roomId);
     if (room && room.settings) {
         roomConfigs.set(roomId, room.settings);
         return room.settings;
     }
-    
+
     // Return empty config if room not found
     return {};
 }
@@ -834,12 +798,12 @@ async function initFiles() {
     }
 
     await mainInit();
-    
+
     // Ensure global room exists and migrate legacy sessions
     logger.info('Ensuring global room and migrating legacy data...');
     await db.createDefaultGlobalRoom();
     await db.migrateExistingDataToGlobalRoom();
-    
+
     let [hostKey, modKey] = generateServerKeys();
 
     console.log('')
@@ -991,27 +955,27 @@ export async function broadcastToRoom(roomId, message, role = 'all') {
         logger.error('[broadcastToRoom] CRITICAL: Called without roomId! This would cause global sync.');
         return { sentTo: [], totalClients: 0 };
     }
-    
+
     const connections = getRoomConnections(roomId);
     if (connections.size === 0) {
         logger.debug(`[broadcastToRoom] No connections in room ${roomId}`);
         return { sentTo: [], totalClients: 0 };
     }
-    
+
     const shouldReport = !unloggedMessageTypes.includes(message.type);
-    
+
     if (shouldReport) {
         logger.info(`[Room ${roomId}] Broadcasting "${message.type}" to ${connections.size} users`);
     }
-    
+
     const sentTo = [];
     const failedTo = [];
-    
+
     for (const ws of connections) {
         if (!ws || ws.readyState !== WebSocket.OPEN) {
             continue;
         }
-        
+
         // Role filtering if needed
         if (role !== 'all') {
             const userId = getWsUser(ws);
@@ -1027,7 +991,7 @@ export async function broadcastToRoom(roomId, message, role = 'all') {
                 }
             }
         }
-        
+
         try {
             ws.send(JSON.stringify(message));
             const userId = getWsUser(ws);
@@ -1038,15 +1002,15 @@ export async function broadcastToRoom(roomId, message, role = 'all') {
             logger.error(`[broadcastToRoom] Failed to send to user:`, sendError);
         }
     }
-    
+
     if (shouldReport && sentTo.length > 0) {
         logger.info(`[Room ${roomId}] Sent "${message.type}" to: ${sentTo.join(', ')}`);
     }
-    
+
     if (failedTo.length > 0) {
         logger.warn(`[Room ${roomId}] Failed to send to: ${failedTo.join(', ')}`);
     }
-    
+
     return { sentTo, totalClients: connections.size };
 }
 
@@ -1060,7 +1024,7 @@ export async function broadcastToRoom(roomId, message, role = 'all') {
  */
 async function requireRoom(ws, data, handler) {
     const roomId = getWsRoom(ws);
-    
+
     if (!roomId) {
         logger.warn(`[requireRoom] Blocked message type "${data.type}" - no room context`);
         ws.send(JSON.stringify({
@@ -1070,7 +1034,7 @@ async function requireRoom(ws, data, handler) {
         }));
         return false;
     }
-    
+
     // Validate user is actually in the room
     const userId = getWsUser(ws);
     if (userId) {
@@ -1085,7 +1049,7 @@ async function requireRoom(ws, data, handler) {
             return false;
         }
     }
-    
+
     try {
         await handler(ws, data, roomId);
         return true;
@@ -1573,7 +1537,7 @@ async function handleConnections(ws, type, request) {
                     logger.warn('recognized startClearChatTimer message');
 
                     const { target, secondsLeft } = parsedMessage;
-                    
+
                     // Capture room context for use in timer callback
                     const timerRoomId = getWsRoom(ws);
                     const timerKey = timerRoomId ? `${target}:${timerRoomId}` : target;
@@ -1589,7 +1553,7 @@ async function handleConnections(ws, type, request) {
                         target,
                         roomId: timerRoomId
                     };
-                    
+
                     // Broadcast to room or globally
                     if (timerRoomId) {
                         await broadcastToRoom(timerRoomId, responseMessage);
@@ -1606,7 +1570,7 @@ async function handleConnections(ws, type, request) {
                         if (target === '#AIChat') {
                             logger.warn(`Saving and clearing AIChat for room ${timerRoomId || 'global'}...`);
                             const newSessionID = await saveAndClearChat('AIChat', timerRoomId);
-                            
+
                             // Broadcast clear to room or globally
                             const clearMsg = { type: 'clearAIChat', sessionID: newSessionID, roomId: timerRoomId };
                             if (timerRoomId) {
@@ -1655,7 +1619,7 @@ async function handleConnections(ws, type, request) {
                                         AIChatUserList: [{ username: charName, color: 'white', entity: 'AI', role: 'AI' }],
                                         roomId: timerRoomId
                                     };
-                                    
+
                                     if (timerRoomId) {
                                         await broadcastToRoom(timerRoomId, outMessage);
                                     } else {
@@ -1729,9 +1693,9 @@ async function handleConnections(ws, type, request) {
                         liveConfig.promptConfig.selectedCharacterDisplayName = parsedMessage.newCharDisplayName;
                         await fio.writeConfig(liveConfig);
                     }
-                    
+
                     await db.upsertChar(parsedMessage.newChar, parsedMessage.newCharDisplayName, user.color);
-                    
+
                     // Broadcast to room or globally
                     if (currentRoomId) {
                         await broadcastToRoom(currentRoomId, changeCharMessage, 'host');
@@ -1947,10 +1911,10 @@ async function handleConnections(ws, type, request) {
                     // Get room context for filtering past chats
                     const currentRoomId = getWsRoom(ws);
                     logger.info(`[pastChatsRequest] Room context: ${currentRoomId || 'NONE (global)'}`);
-                    
+
                     const pastChats = await db.getPastChats('ai', currentRoomId);
                     logger.info(`[pastChatsRequest] Found ${Object.keys(pastChats).length} past chats for room ${currentRoomId || 'global'}`);
-                    
+
                     const pastChatsListMessage = {
                         type: 'pastChatsList',
                         pastChats: pastChats,
@@ -1967,7 +1931,7 @@ async function handleConnections(ws, type, request) {
                 else if (parsedMessage.type === 'loadPastChat') {
                     const currentRoomId = getWsRoom(ws);
                     const requestedSessionId = parsedMessage.session;
-                    
+
                     // Validate session belongs to current room (prevent cross-room access)
                     const sessionInfo = await db.getSessionRoom(requestedSessionId);
                     if (currentRoomId && sessionInfo && sessionInfo.room_id !== currentRoomId) {
@@ -1979,7 +1943,7 @@ async function handleConnections(ws, type, request) {
                         }));
                         return;
                     }
-                    
+
                     const [pastChat, sessionID] = await db.readAIChat(requestedSessionId, currentRoomId);
                     await db.setActiveChat(sessionID, currentRoomId);
                     let jsonArray = JSON.parse(pastChat);
@@ -2000,7 +1964,7 @@ async function handleConnections(ws, type, request) {
                 else if (parsedMessage.type === 'pastChatDelete') {
                     const currentRoomId = getWsRoom(ws);
                     const sessionID = parsedMessage.sessionID;
-                    
+
                     // Validate session belongs to current room
                     const sessionInfo = await db.getSessionRoom(sessionID);
                     if (currentRoomId && sessionInfo && sessionInfo.room_id !== currentRoomId) {
@@ -2012,7 +1976,7 @@ async function handleConnections(ws, type, request) {
                         }));
                         return;
                     }
-                    
+
                     let [result, wasActive] = await db.deletePastChat(sessionID);
                     logger.debug('Past Chat Deletion: ', result, wasActive);
                     if (result === 'ok') {
@@ -2221,7 +2185,7 @@ async function handleConnections(ws, type, request) {
             // ================================
             // ROOM MANAGEMENT HANDLERS - Critical for message isolation
             // ================================
-            
+
             if (parsedMessage.type === 'listRooms') {
                 const rooms = await db.getAllActiveRooms();
                 ws.send(JSON.stringify({
@@ -2237,10 +2201,10 @@ async function handleConnections(ws, type, request) {
                 }));
                 return;
             }
-            
+
             else if (parsedMessage.type === 'createRoom') {
                 const { name, description } = parsedMessage;
-                
+
                 if (!name || name.trim().length === 0) {
                     ws.send(JSON.stringify({
                         type: 'roomError',
@@ -2249,7 +2213,7 @@ async function handleConnections(ws, type, request) {
                     }));
                     return;
                 }
-                
+
                 if (name.length > 50) {
                     ws.send(JSON.stringify({
                         type: 'roomError',
@@ -2258,7 +2222,7 @@ async function handleConnections(ws, type, request) {
                     }));
                     return;
                 }
-                
+
                 try {
                     const room = await db.createRoom(
                         name.trim(),
@@ -2266,19 +2230,19 @@ async function handleConnections(ws, type, request) {
                         uuid,
                         {} // Initial settings (empty, uses global defaults)
                     );
-                    
+
                     // Associate this WebSocket with the new room
                     setWsRoom(ws, room.room_id, uuid);
-                    
+
                     // Get room's active session for chat history
                     const sessionId = await db.getRoomActiveSession(room.room_id, 'ai');
-                    
+
                     ws.send(JSON.stringify({
                         type: 'roomCreated',
                         room: room,
                         sessionId: sessionId
                     }));
-                    
+
                     // Broadcast updated room list to everyone
                     const rooms = await db.getAllActiveRooms();
                     broadcast({
@@ -2292,7 +2256,7 @@ async function handleConnections(ws, type, request) {
                             created_at: r.created_at
                         }))
                     });
-                    
+
                     logger.info(`[Room] User ${clientsObject[uuid]?.username || uuid} created room "${name}"`);
                 } catch (err) {
                     logger.error('[createRoom] Error:', err);
@@ -2304,10 +2268,10 @@ async function handleConnections(ws, type, request) {
                 }
                 return;
             }
-            
+
             else if (parsedMessage.type === 'joinRoom') {
                 const { roomId } = parsedMessage;
-                
+
                 if (!roomId) {
                     ws.send(JSON.stringify({
                         type: 'roomError',
@@ -2316,7 +2280,7 @@ async function handleConnections(ws, type, request) {
                     }));
                     return;
                 }
-                
+
                 try {
                     // Check room exists
                     const room = await db.getRoomById(roomId);
@@ -2328,13 +2292,13 @@ async function handleConnections(ws, type, request) {
                         }));
                         return;
                     }
-                    
+
                     // Leave current room if in one
                     const currentRoom = getWsRoom(ws);
                     if (currentRoom) {
                         await db.removeRoomMember(currentRoom, uuid);
                         removeWsFromRoom(ws);
-                        
+
                         // Notify old room members
                         broadcastToRoom(currentRoom, {
                             type: 'memberLeft',
@@ -2342,14 +2306,14 @@ async function handleConnections(ws, type, request) {
                             username: thisUserUsername
                         });
                     }
-                    
+
                     // Add to new room
                     await db.addRoomMember(roomId, uuid, 'member');
                     setWsRoom(ws, roomId, uuid);
-                    
+
                     // Get room members
                     const members = await db.getRoomMembers(roomId);
-                    
+
                     // Get room's chat history
                     const sessionId = await db.getRoomActiveSession(roomId, 'ai');
                     let chatHistory = [];
@@ -2357,16 +2321,16 @@ async function handleConnections(ws, type, request) {
                         const [chatData] = await db.readAIChat(sessionId);
                         chatHistory = JSON.parse(chatData || '[]');
                     }
-                    
+
                     // Get room's user chat history
                     // TODO: Add room-scoped user chat reading
-                    
+
                     // Get room config
                     const roomConfig = await getRoomConfig(roomId);
-                    
+
                     // Get room's past chats for the control panel
                     const pastChats = await db.getPastChats('ai', roomId);
-                    
+
                     ws.send(JSON.stringify({
                         type: 'roomJoined',
                         room: {
@@ -2386,7 +2350,7 @@ async function handleConnections(ws, type, request) {
                         config: roomConfig,
                         pastChats: pastChats // Include room-specific past chats
                     }));
-                    
+
                     // Notify other room members
                     broadcastToRoom(roomId, {
                         type: 'memberJoined',
@@ -2394,7 +2358,7 @@ async function handleConnections(ws, type, request) {
                         username: thisUserUsername,
                         userColor: await db.getUserColor(uuid)
                     });
-                    
+
                     // Update room list for everyone
                     const rooms = await db.getAllActiveRooms();
                     broadcast({
@@ -2408,7 +2372,7 @@ async function handleConnections(ws, type, request) {
                             created_at: r.created_at
                         }))
                     });
-                    
+
                     logger.info(`[Room] User ${thisUserUsername} joined room "${room.name}"`);
                 } catch (err) {
                     logger.error('[joinRoom] Error:', err);
@@ -2420,10 +2384,10 @@ async function handleConnections(ws, type, request) {
                 }
                 return;
             }
-            
+
             else if (parsedMessage.type === 'leaveRoom') {
                 const currentRoom = getWsRoom(ws);
-                
+
                 if (!currentRoom) {
                     ws.send(JSON.stringify({
                         type: 'roomError',
@@ -2432,24 +2396,24 @@ async function handleConnections(ws, type, request) {
                     }));
                     return;
                 }
-                
+
                 try {
                     // Leave the room
                     await db.removeRoomMember(currentRoom, uuid);
                     removeWsFromRoom(ws);
-                    
+
                     ws.send(JSON.stringify({
                         type: 'roomLeft',
                         roomId: currentRoom
                     }));
-                    
+
                     // Notify remaining room members
                     broadcastToRoom(currentRoom, {
                         type: 'memberLeft',
                         userId: uuid,
                         username: thisUserUsername
                     });
-                    
+
                     // Update room list for everyone
                     const rooms = await db.getAllActiveRooms();
                     broadcast({
@@ -2463,7 +2427,7 @@ async function handleConnections(ws, type, request) {
                             created_at: r.created_at
                         }))
                     });
-                    
+
                     logger.info(`[Room] User ${thisUserUsername} left room ${currentRoom}`);
                 } catch (err) {
                     logger.error('[leaveRoom] Error:', err);
@@ -2475,11 +2439,11 @@ async function handleConnections(ws, type, request) {
                 }
                 return;
             }
-            
+
             else if (parsedMessage.type === 'roomSettingsUpdate') {
                 const { settings } = parsedMessage;
                 const currentRoom = getWsRoom(ws);
-                
+
                 if (!currentRoom) {
                     ws.send(JSON.stringify({
                         type: 'roomError',
@@ -2488,7 +2452,7 @@ async function handleConnections(ws, type, request) {
                     }));
                     return;
                 }
-                
+
                 try {
                     // Check user has permission (creator or moderator)
                     const role = await db.getUserRoomRole(currentRoom, uuid);
@@ -2500,15 +2464,15 @@ async function handleConnections(ws, type, request) {
                         }));
                         return;
                     }
-                    
+
                     await setRoomConfig(currentRoom, settings);
-                    
+
                     // Broadcast to all room members
                     broadcastToRoom(currentRoom, {
                         type: 'roomSettingsChanged',
                         settings: settings
                     });
-                    
+
                     logger.info(`[Room] Settings updated for room ${currentRoom} by ${thisUserUsername}`);
                 } catch (err) {
                     logger.error('[roomSettingsUpdate] Error:', err);
@@ -2520,11 +2484,11 @@ async function handleConnections(ws, type, request) {
                 }
                 return;
             }
-            
+
             else if (parsedMessage.type === 'deleteRoom') {
                 const { roomId } = parsedMessage;
                 const targetRoom = roomId || getWsRoom(ws);
-                
+
                 if (!targetRoom) {
                     ws.send(JSON.stringify({
                         type: 'roomError',
@@ -2533,7 +2497,7 @@ async function handleConnections(ws, type, request) {
                     }));
                     return;
                 }
-                
+
                 try {
                     // Check user has permission (creator only, or host)
                     const role = await db.getUserRoomRole(targetRoom, uuid);
@@ -2545,21 +2509,21 @@ async function handleConnections(ws, type, request) {
                         }));
                         return;
                     }
-                    
+
                     // Notify all room members before deletion
                     broadcastToRoom(targetRoom, {
                         type: 'roomDeleted',
                         roomId: targetRoom,
                         message: 'This room has been deleted'
                     });
-                    
+
                     // Soft delete the room
                     await db.deleteRoom(targetRoom);
-                    
+
                     // Clear room state
                     roomsState.delete(targetRoom);
                     roomConfigs.delete(targetRoom);
-                    
+
                     // Update room list for everyone
                     const rooms = await db.getAllActiveRooms();
                     broadcast({
@@ -2573,7 +2537,7 @@ async function handleConnections(ws, type, request) {
                             created_at: r.created_at
                         }))
                     });
-                    
+
                     logger.info(`[Room] Room ${targetRoom} deleted by ${thisUserUsername}`);
                 } catch (err) {
                     logger.error('[deleteRoom] Error:', err);
@@ -2585,7 +2549,7 @@ async function handleConnections(ws, type, request) {
                 }
                 return;
             }
-            
+
             // ================================
             // USER AUTHENTICATION HANDLERS
             // ================================
@@ -2771,7 +2735,7 @@ async function handleConnections(ws, type, request) {
                 const senderUUID = parsedMessage.UUID
                 const canPost = liveConfig.crowdControl.guestInputPermissionState;
                 var userPrompt
-                
+
                 // Get room context for message isolation
                 const currentRoomId = getWsRoom(ws);
 
@@ -2824,7 +2788,7 @@ async function handleConnections(ws, type, request) {
                             timestamp: lastItem?.timestamp || new Date().toISOString(),
                             roomId: currentRoomId // Include room context
                         }
-                        
+
                         // CRITICAL: Use room-scoped broadcast if in a room
                         if (currentRoomId) {
                             await broadcastToRoom(currentRoomId, userPrompt);
@@ -2855,8 +2819,8 @@ async function handleConnections(ws, type, request) {
                 //read the current userChat file
                 if (chatID === 'userChat') {
                     parsedMessage.content = parsedMessage.content.slice(0, 1000); //force respect the message size limit
-                    // TODO: Pass roomId to writeUserChatMessage when room-scoped sessions are ready
-                    await db.writeUserChatMessage(uuid, parsedMessage.content)
+                    // Pass roomId to writeUserChatMessage for room-scoped sessions
+                    await db.writeUserChatMessage(uuid, parsedMessage.content, currentRoomId)
                     let [newdata, sessionID] = await db.readUserChat()
                     let newJsonArray = JSON.parse(newdata);
                     let lastItem = newJsonArray[newJsonArray.length - 1]
@@ -2877,7 +2841,7 @@ async function handleConnections(ws, type, request) {
                         roomId: currentRoomId // Include room context
                     }
                     //logger.info(newUserChatMessage)
-                    
+
                     // CRITICAL: Use room-scoped broadcast if in a room
                     if (currentRoomId) {
                         await broadcastToRoom(currentRoomId, newUserChatMessage);
@@ -2916,7 +2880,7 @@ async function handleConnections(ws, type, request) {
             try {
                 await db.removeRoomMember(roomId, uuid);
                 removeWsFromRoom(ws);
-                
+
                 // Notify remaining room members
                 broadcastToRoom(roomId, {
                     type: 'memberLeft',
@@ -2924,7 +2888,7 @@ async function handleConnections(ws, type, request) {
                     username: clientsObject[uuid]?.username || 'Unknown',
                     reason: 'disconnect'
                 });
-                
+
                 logger.info(`[Room] User ${uuid} auto-left room ${roomId} on disconnect`);
             } catch (err) {
                 logger.error('[Room] Error during disconnect cleanup:', err);

@@ -177,29 +177,31 @@ async function ensureDatabaseSchema(schemaDictionary) {
 }
 
 // Write the session ID of whatever the active session in the sessions table is
-async function writeUserChatMessage(userId, message) {
-    logger.debug('Writing user chat message to database...');
+async function writeUserChatMessage(userId, message, roomId = GLOBAL_ROOM_ID) {
+    logger.debug(`Writing user chat message to database for room: ${roomId}...`);
     const client = await getClient();
     try {
         await client.query('BEGIN');
 
-        let res = await client.query('SELECT session_id FROM "userSessions" WHERE is_active = TRUE');
+        // Look for active session for THIS SPECIFIC ROOM
+        let res = await client.query('SELECT session_id FROM "userSessions" WHERE is_active = TRUE AND room_id = $1', [roomId]);
         let session_id;
 
         if (res.rows.length > 0) {
             session_id = res.rows[0].session_id;
-            logger.debug(`Using existing user session_id: ${session_id}`);
+            logger.debug(`Using existing user session_id: ${session_id} (Room: ${roomId})`);
         } else {
-            const insertRes = await client.query('INSERT INTO "userSessions" (is_active, started_at) VALUES (TRUE, CURRENT_TIMESTAMP) RETURNING session_id');
+            // Create new session for this room
+            const insertRes = await client.query('INSERT INTO "userSessions" (is_active, started_at, room_id) VALUES (TRUE, CURRENT_TIMESTAMP, $1) RETURNING session_id', [roomId]);
             session_id = insertRes.rows[0].session_id;
-            logger.debug(`Created new user session_id: ${session_id}`);
+            logger.debug(`Created new user session_id: ${session_id} for room ${roomId}`);
         }
 
         const timestamp = new Date().toISOString();
 
         const insertMsgRes = await client.query(
-            'INSERT INTO userchats (user_id, message, timestamp, active, session_id) VALUES ($1, $2, $3, TRUE, $4) RETURNING message_id',
-            [userId, message, timestamp, session_id]
+            'INSERT INTO userchats (user_id, message, timestamp, active, session_id, room_id) VALUES ($1, $2, $3, TRUE, $4, $5) RETURNING message_id',
+            [userId, message, timestamp, session_id, room_id]
         );
         const message_id = insertMsgRes.rows[0].message_id;
 
@@ -443,28 +445,29 @@ function collapseNewlines(x) {
     return s.replace(/\n+/g, '\n');
 }
 
-async function writeAIChatMessage(username, userId, message, entity) {
-    logger.info('Writing AI chat message...Username: ' + username + ', User ID: ' + userId + ', Entity: ' + entity);
+async function writeAIChatMessage(username, userId, message, entity, roomId = GLOBAL_ROOM_ID) {
+    logger.info(`Writing AI chat message for room ${roomId}...Username: ${username}, User ID: ${userId}, Entity: ${entity}`);
     const client = await getClient();
     try {
         await client.query('BEGIN');
         const cleanMessage = collapseNewlines(message);
 
+        // Look for active session for THIS SPECIFIC ROOM
         let sessionId;
-        const sessRes = await client.query('SELECT session_id FROM sessions WHERE is_active = TRUE');
+        const sessRes = await client.query('SELECT session_id FROM sessions WHERE is_active = TRUE AND room_id = $1', [roomId]);
         if (sessRes.rows.length > 0) {
             sessionId = sessRes.rows[0].session_id;
         } else {
-            logger.warn('No active session found, creating a new session...');
-            const newSessRes = await client.query('INSERT INTO sessions (is_active) VALUES (TRUE) RETURNING session_id');
+            logger.warn(`No active session found for room ${roomId}, creating a new session...`);
+            const newSessRes = await client.query('INSERT INTO sessions (is_active, room_id) VALUES (TRUE, $1) RETURNING session_id', [roomId]);
             sessionId = newSessRes.rows[0].session_id;
-            logger.info(`A new session was created with session_id ${sessionId}`);
+            logger.info(`A new session was created with session_id ${sessionId} for room ${roomId}`);
         }
 
         const timestamp = new Date().toISOString();
         const insertRes = await client.query(
-            'INSERT INTO aichats (session_id, user_id, message, username, entity, timestamp) VALUES ($1, $2, $3, $4, $5, $6) RETURNING message_id',
-            [sessionId, userId, cleanMessage, username, entity, timestamp]
+            'INSERT INTO aichats (session_id, user_id, message, username, entity, timestamp, room_id) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING message_id',
+            [sessionId, userId, cleanMessage, username, entity, timestamp, roomId]
         );
         const resultingMessageID = insertRes.rows[0].message_id;
 
@@ -479,16 +482,16 @@ async function writeAIChatMessage(username, userId, message, entity) {
     }
 }
 
-async function newSession() {
-    logger.info('Creating a new session...');
+async function newSession(roomId = GLOBAL_ROOM_ID) {
+    logger.info(`Creating a new session for room: ${roomId}...`);
     const client = await getClient();
     try {
         await client.query('BEGIN');
         await client.query('UPDATE sessions SET is_active = FALSE, ended_at = CURRENT_TIMESTAMP WHERE is_active = TRUE');
-        const res = await client.query('INSERT INTO sessions (is_active, started_at) VALUES (TRUE, CURRENT_TIMESTAMP) RETURNING session_id');
+        const res = await client.query('INSERT INTO sessions (is_active, started_at, room_id) VALUES (TRUE, CURRENT_TIMESTAMP, $1) RETURNING session_id', [roomId]);
         const newSessionID = res.rows[0].session_id;
         await client.query('COMMIT');
-        logger.info('Creating a new session with session_id ' + newSessionID + '...');
+        logger.info('Created new session with session_id ' + newSessionID + ' for room ' + roomId);
         return newSessionID;
     } catch (error) {
         await client.query('ROLLBACK');

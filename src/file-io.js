@@ -320,8 +320,8 @@ async function charaWrite(img_url, data) {
 
         // Fields to update (v1 and v2)
         const fieldsToUpdate = [
-            'name', 
-            'description', 
+            'name',
+            'description',
             'first_mes',
             'personality',
             'scenario',

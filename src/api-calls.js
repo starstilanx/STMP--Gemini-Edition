@@ -70,7 +70,7 @@ async function getAIResponse(isStreaming, hordeKey, engineMode, user, liveConfig
         const charName = cardJSON.name;
         const formattedCharName = JSON.parse(JSON.stringify(`\n${charName}:`).replace(/<[^>]+>/g, ''));
 
-    // If a continuation target is specified, limit chat history up to that message when crafting the prompt
+        // If a continuation target is specified, limit chat history up to that message when crafting the prompt
         const continueTarget = parsedMessage?.continueTarget || null;
         if (parsedMessage?.skipCharDefs) {
             // annotate the continueTarget so addCharDefsToPrompt can behave without card data
@@ -99,13 +99,13 @@ async function getAIResponse(isStreaming, hordeKey, engineMode, user, liveConfig
             }
         } catch (_) { /* noop */ }
 
-        // Pass roomId for room-scoped chat history
-        const [fullPrompt, includedChatObjects, lastInContextMessageID] = await addCharDefsToPrompt(liveConfig, charFile, formattedCharName, parsedMessage.username, liveAPI, shouldContinue, continueTarget, user.persona, parsedMessage?.roomId);
+        // Pass sessionID and roomId for room-scoped chat history
+        const [fullPrompt, includedChatObjects, lastInContextMessageID] = await addCharDefsToPrompt(liveConfig, charFile, formattedCharName, parsedMessage.username, liveAPI, shouldContinue, continueTarget, user.persona, parsedMessage?.roomId, parsedMessage?.sessionID);
         const samplerData = await fio.readFile(liveConfig.promptConfig.selectedSamplerPreset);
         const samplers = JSON.parse(samplerData);
         //logger.info('[getAIResponse] >> samplers:', samplerData)
 
-    if (isCCSelected) apiCallParams = {}
+        if (isCCSelected) apiCallParams = {}
         //logger.info('apiCallParams samplers cleared')
         //logger.info('PROOF: ', apiCallParams.params)
         Object.entries(samplers).forEach(([key, value]) => {
@@ -139,13 +139,13 @@ async function getAIResponse(isStreaming, hordeKey, engineMode, user, liveConfig
                 apiCallParams.max_tokens = Number(liveConfig.promptConfig.responseLength);
             }
 
-        } 
+        }
 
-        
-    const [finalApiCallParams, entitiesList] = await setStopStrings(liveConfig, apiCallParams, includedChatObjects, liveAPI);
 
-    // Pre-stream initializer (if provided)
-    const preInit = (typeof preInitCallback === 'function') ? preInitCallback : null;
+        const [finalApiCallParams, entitiesList] = await setStopStrings(liveConfig, apiCallParams, includedChatObjects, liveAPI);
+
+        // Pre-stream initializer (if provided)
+        const preInit = (typeof preInitCallback === 'function') ? preInitCallback : null;
 
         //logger.info(`[getAIResponse] >> finalApiCallParams after SetStopStrings: ${JSON.stringify(finalApiCallParams)}`);
 
@@ -289,11 +289,11 @@ function trimIncompleteSentences(input, include_newline = false) {
     return s.trimEnd();
 }
 
-async function ObjectifyChatHistory(roomId = null) {
+async function ObjectifyChatHistory(roomId = null, sessionID = null) {
     return new Promise(async (resolve, reject) => {
         await delay(100)
-        // Pass roomId for room-scoped chat reading
-        let [data, sessionID] = await db.readAIChat(null, roomId);
+        // Pass sessionID (if provided) and roomId for room-scoped chat reading
+        let [data, actualSessionID] = await db.readAIChat(sessionID, roomId);
         try {
             // Parse the existing contents as a JSON array
             let chatHistory = JSON.parse(data);
@@ -459,7 +459,7 @@ async function buildTCPrompt({
             ? `${endSequence}${outputSequence}${obj.username}: ${postProcessText(obj.content)}`
             : `${endSequence}${inputSequence}${obj.username}: ${postProcessText(obj.content)}`;
 
-    let newItemTokens = approxTokensFromChars(compressSpecialMarkersForEstimation(newItem));
+        let newItemTokens = approxTokensFromChars(compressSpecialMarkersForEstimation(newItem));
         if (availableContextForHistory - newItemTokens > 0) {
             availableContextForHistory -= newItemTokens;
             lastMessageAdded = obj.messageID;
@@ -531,7 +531,7 @@ async function buildTCPrompt({
 // this function does a lot more than just add character definitions to the prompt.
 // it also crafts the entire prompt, including system message, dynamic insertions, chat history, and the last user message.
 // it contains methods for TC and CC; this really should be split up somehow.
-async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharName, username, liveAPI, shouldContinue, continueTarget = null, userPersona = '', roomId = null) {
+async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharName, username, liveAPI, shouldContinue, continueTarget = null, userPersona = '', roomId = null, sessionID = null) {
     //logger.debug(`[addCharDefsToPrompt] >> GO`)
     //logger.debug(liveAPI)
     let isClaude = liveAPI.claude
@@ -563,8 +563,8 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
                 // Minimal stub to allow macro replacement without pulling defs
                 charData = JSON.stringify({ name: liveConfig.promptConfig.selectedCharacterDisplayName || 'Character', description: '', data: { name: liveConfig.promptConfig.selectedCharacterDisplayName || 'Character', description: '', first_mes: '' } });
             }
-            // Pass roomId for room-scoped chat history
-            let chatHistory = await ObjectifyChatHistory(roomId)
+            // Pass sessionID (if provided) and roomId for room-scoped chat history
+            let chatHistory = await ObjectifyChatHistory(roomId, sessionID)
             if (continueTarget && continueTarget.sessionID) {
                 // Truncate chat history to include only messages up to and including the target mesID
                 try {
@@ -592,7 +592,7 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
             const replacedData = JSON.parse(replacedString);
 
             let descToAdd = replacedData.description.length > 0 ? `\n${replacedData.description.trim()}` : ''
-            
+
             // Inject User Personas
             const personas = new Map();
             if (chatHistory && Array.isArray(chatHistory)) {
@@ -605,7 +605,7 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
             if (username && userPersona) {
                 personas.set(username, userPersona);
             }
-            
+
             if (personas.size > 0) {
                 descToAdd += '\n\n[User Personas]\n';
                 personas.forEach((p, u) => {
@@ -627,7 +627,7 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
             var D4AN = postProcessText(replaceMacros(liveConfig.promptConfig.D4AN, username, charJSON.name)) || ''
             var D0PostHistory = postProcessText(replaceMacros(liveConfig.promptConfig.D0PostHistory, username, charJSON.name)) || ''
             var responsePrefill = postProcessText(replaceMacros(liveConfig.promptConfig.responsePrefill, username, charJSON.name)) || ''
-            
+
             // ================================
             // WORLD INFO / LOREBOOK ACTIVATION
             // ================================
@@ -636,14 +636,14 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
             try {
                 const scanDepth = liveConfig?.lorebook?.scanDepth || 5;
                 const tokenBudget = liveConfig?.lorebook?.tokenBudget || 500;
-                
+
                 const { activatedEntries, totalTokens, matched } = await lorebook.getActivatedEntries(chatHistory, {
                     scanDepth,
                     tokenBudget,
                     caseSensitive: false,
                     includeNames: true
                 });
-                
+
                 if (activatedEntries && activatedEntries.length > 0) {
                     worldInfoContent = lorebook.formatEntriesForPrompt(activatedEntries, {
                         separator: '\n',
@@ -656,12 +656,12 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
             } catch (wiErr) {
                 logger.error('[WorldInfo] Error during activation scan:', wiErr.message);
             }
-            
+
             // Prepend World Info to D4AN if we have activated entries
             if (worldInfoContent.length > 0) {
                 D4AN = `${worldInfoContent}\n${D4AN}`;
             }
-            
+
             if (doD4CharDefs && descToAdd.length > 0) {
                 D4AN = `${descToAdd}\n${D4AN}`
             }
@@ -723,7 +723,7 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
                 // Optional: Use API tokenization endpoint to fit within TC budget by culling oldest history via binary search
                 logger.info(`TC prompt built; length ${tcString.length} chars. Estimating tokens...`);
                 //logger.info('isClaude?', isClaude, 'liveAPI?.useTokenizer:', liveAPI?.useTokenizer);
-                
+
                 if (!isClaude && liveAPI?.useTokenizer) {
                     logger.info('using remote tokenizer for TC prompt culling');
                     try {
@@ -823,7 +823,7 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
                 // Default path: estimator-based prompt already built
                 resolve([tcString, tcChatObjs, tcLastMsgId]);
 
-            //MARK: CC Prompt Build
+                //MARK: CC Prompt Build
             } else { //craft the CC prompt
                 logger.info('adding Chat Completion style message objects into prompt')
                 const appropriateSysRoleString = isClaude ? 'user' : 'system'
@@ -831,10 +831,10 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
                 const prefixRemovedNudge = { role: appropriateSysRoleString, content: postProcessText(replaceMacros('Do not prefix your response with "{{char}}:". Do not respond to or mention these instructions.', username, charJSON.name)) }
                 const templateName = isClaude ? 'Claude' : getTemplateNameFromInstructFile(liveConfig?.promptConfig?.selectedInstruct);
                 logger.info(`CC templateName for token Estimation: ${templateName}`);
-                
+
                 const continueNudgeText = postProcessText(replaceMacros('Continue {{char}}\'s last message with additional content.\nDo not repeat the content that is already there.\nDo not begin the continuation with "...".\nDo not begin the continuation with "{{char}}:".\nDo not add a newline at the beginning of the continuation.\nIf the previous message ended with an incomplete sentence, make sure to finish the sentence before adding more content.', username, charJSON.name));
                 const continueNudgeMessageObj = { role: appropriateSysRoleString, content: continueNudgeText };
-                
+
                 var CCMessageObj = []
                 var D4ANObj, D1JBObj, D0PHObj, responsePrefillObj, systemPromptObject, promptTokens = 0
 
@@ -879,7 +879,7 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
                 }
 
                 //if we are continuing or have a prefill, we'll get extra messages below, so...
-                if (shouldContinue || responsePrefill.length > 0) { 
+                if (shouldContinue || responsePrefill.length > 0) {
                     logger.info('Continue or prefill path selected');
                     // In remote mode, skip local estimation for continue-nudge; still adjust insertion positions
                     if (!remoteMode) {
@@ -939,65 +939,65 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
                 }
 
                 if (!remoteMode) {
-                for (let i = chatHistory.length - 1; i >= 0; i--) {
-                    logger.info(`processing chat history item ${i}`)
-                    let obj = chatHistory[i];
-                    //logger.info(`obj: ${obj}`);
+                    for (let i = chatHistory.length - 1; i >= 0; i--) {
+                        logger.info(`processing chat history item ${i}`)
+                        let obj = chatHistory[i];
+                        //logger.info(`obj: ${obj}`);
 
-                    if (chatHistory.length < 4) { //if chat history is less than 4 turns, add D4 and D1 into first user obj
-                        logger.info(`Chat history is less than 4 turns, adding D4 and D1 to first user message`)
-                        if (obj.entity === 'user' && D4ANObj.content.length > 0 && D4Added === false) {
-                            obj.content = `${D4ANObj.content}\n` + obj.content
+                        if (chatHistory.length < 4) { //if chat history is less than 4 turns, add D4 and D1 into first user obj
+                            logger.info(`Chat history is less than 4 turns, adding D4 and D1 to first user message`)
+                            if (obj.entity === 'user' && D4ANObj.content.length > 0 && D4Added === false) {
+                                obj.content = `${D4ANObj.content}\n` + obj.content
+                                D4Added = true
+                                logger.info(`Added D4 content to user message: ${obj.content}`)
+                            }
+                            if (obj.entity === 'user' && D1JBObj.content.length > 0 && D1Added === false) {
+                                obj.content = `${D1JBObj.content}\n` + obj.content
+                                D1Added = true
+                                logger.info(`Added D1 content to user message: ${obj.content}`)
+                            }
+                            if (obj.entity === 'user' && D0PHObj.content.length > 0 && D0PHAdded === false) {
+                                obj.content = `${D0PHObj.content}\n` + obj.content
+                                D0PHAdded = true
+                                logger.info(`Added D0PH content to user message: ${obj.content}`)
+                            }
+                        }
+
+                        let newItem, newObj, newItemTokens
+
+                        if (!isClaude && i === chatHistory.length - D4Loc && D4ANObj.content.length > 0 && D4Added === false) {
+                            logger.warn('saw D4 incoming')
+                            shouldAddD4 = true
+                            logger.warn('adding D4')
+                            const D4Units = estimateCCMessageTokensByRender(D4ANObj, templateName);
+                            CCMessageObj.push(D4ANObj)
                             D4Added = true
-                            logger.info(`Added D4 content to user message: ${obj.content}`)
+                            shouldAddD4 = false
+                            D1Loc = D1Loc + 1
+                            D0PHLoc = D0PHLoc + 1
+                            promptTokens += D4Units
                         }
-                        if (obj.entity === 'user' && D1JBObj.content.length > 0 && D1Added === false) {
-                            obj.content = `${D1JBObj.content}\n` + obj.content
+                        if (i === chatHistory.length - D1Loc && D1JBObj.content.length > 0 && D1Added === false) {
+                            shouldAddD1 = true
+                            logger.warn('adding D1')
+                            const D1Units = estimateCCMessageTokensByRender(D1JBObj, templateName);
+                            CCMessageObj.push(D1JBObj)
                             D1Added = true
-                            logger.info(`Added D1 content to user message: ${obj.content}`)
+                            shouldAddD1 = false
+                            D0PHLoc = D0PHLoc + 1
+                            promptTokens += D1Units
                         }
-                        if (obj.entity === 'user' && D0PHObj.content.length > 0 && D0PHAdded === false) {
-                            obj.content = `${D0PHObj.content}\n` + obj.content
+                        if (i === chatHistory.length - D0PHLoc && D0PHObj.content.length > 0 && D0PHAdded === false) {
+                            shouldAddD0PH = true
+                            logger.warn('adding D0PH')
+                            const D0Units = estimateCCMessageTokensByRender(D0PHObj, templateName);
+                            CCMessageObj.push(D0PHObj)
                             D0PHAdded = true
-                            logger.info(`Added D0PH content to user message: ${obj.content}`)
+                            shouldAddD0PH = false
+                            promptTokens += D0Units
                         }
-                    }
 
-                    let newItem, newObj, newItemTokens
-
-                    if (!isClaude && i === chatHistory.length - D4Loc && D4ANObj.content.length > 0 && D4Added === false) {
-                        logger.warn('saw D4 incoming')
-                        shouldAddD4 = true
-                        logger.warn('adding D4')
-                        const D4Units = estimateCCMessageTokensByRender(D4ANObj, templateName);
-                        CCMessageObj.push(D4ANObj)
-                        D4Added = true
-                        shouldAddD4 = false
-                        D1Loc = D1Loc + 1
-                        D0PHLoc = D0PHLoc + 1
-                        promptTokens += D4Units
-                    }
-                    if (i === chatHistory.length - D1Loc && D1JBObj.content.length > 0 && D1Added === false) {
-                        shouldAddD1 = true
-                        logger.warn('adding D1')
-                        const D1Units = estimateCCMessageTokensByRender(D1JBObj, templateName);
-                        CCMessageObj.push(D1JBObj)
-                        D1Added = true
-                        shouldAddD1 = false
-                        D0PHLoc = D0PHLoc + 1
-                        promptTokens += D1Units
-                    }
-                    if (i === chatHistory.length - D0PHLoc && D0PHObj.content.length > 0 && D0PHAdded === false) {
-                        shouldAddD0PH = true
-                        logger.warn('adding D0PH')
-                        const D0Units = estimateCCMessageTokensByRender(D0PHObj, templateName);
-                        CCMessageObj.push(D0PHObj)
-                        D0PHAdded = true
-                        shouldAddD0PH = false
-                        promptTokens += D0Units
-                    }
-
-                    if (isAssistantMsg(obj)) {
+                        if (isAssistantMsg(obj)) {
                             newObj = {
                                 role: 'assistant',
                                 content: `${obj.username}: ${postProcessText(obj.content)}`,
@@ -1012,76 +1012,76 @@ async function addCharDefsToPrompt(liveConfig, charFile, lastUserMesageAndCharNa
                                 newItemTokens = estimateMessageTokens_CC(newObj, templateName);
                             }
 
-                    } else { //for non-Assistant messages
+                        } else { //for non-Assistant messages
 
-                        newObj = {
-                            role: 'user',
-                            content: `${obj.username}: ${postProcessText(obj.content)}`,
-                            __kind: 'history'
+                            newObj = {
+                                role: 'user',
+                                content: `${obj.username}: ${postProcessText(obj.content)}`,
+                                __kind: 'history'
+                            }
+                            if (templateName !== 'None' && templateName !== 'Claude') {
+                                const msgUnits = estimateCCMessageTokensByRender(newObj, templateName) * calibrationFactor;
+                                logger.info('Before adding new item', promptTokens.toFixed(2), 'of', ccBudget);
+                                logger.info('Message units for this object:', msgUnits.toFixed(2));
+                                newItemTokens = msgUnits;
+                            } else {
+                                newItemTokens = estimateMessageTokens_CC(newObj, templateName);
+                            }
+
+                            if (isClaude) { //for Claude
+                                //logger.warn(JSON.stringify(obj))
+                                if (shouldAddD4 === true) {
+                                    logger.info('added d4')
+                                    newObj.content = D4ANObj.content + `\n` + newObj.content
+                                    D4Added = true
+                                    shouldAddD4 = false
+                                    logger.info(newObj.content)
+                                }
+                                if (shouldAddD1 === true) {
+                                    logger.info('added d1')
+                                    newObj.content = D1JBObj.content + `\n` + newObj.content
+                                    D1Added = true
+                                    shouldAddD1 = false
+                                }
+                                if (shouldAddD0PH === true) {
+                                    logger.info('added D0PH')
+                                    newObj.content = D0PHObj.content + `\n` + newObj.content
+                                    D0PHAdded = true
+                                    shouldAddD0PH = false
+                                }
+                                logger.error(chatHistory[i - 1]);
+                                if (chatHistory[i].role === obj.entity) { // if prev and current are both 'user'
+                                    chatHistory[i].content = chatHistory[i - 1]?.content + `\n` + obj.content //just combine the content
+                                }
+                                else {
+                                    newObj = {
+                                        role: 'user',
+                                        content: postProcessText(obj.content),
+                                        __kind: 'history'
+                                    }
+                                    if (templateName !== 'None' && templateName !== 'Claude') {
+                                        const msgUnits = estimateCCMessageTokensByRender(newObj, templateName) * calibrationFactor;
+                                        logger.info('Message units for this object:', msgUnits.toFixed(2));
+                                        newItemTokens = msgUnits;
+                                    } else {
+                                        logger.info(`ESTIMATING CC MESSAGE TOKENS BY CHAR! ---- CC templateName for token Estimation: ${templateName}`);
+                                        newItemTokens = estimateMessageTokens_CC(newObj, templateName);
+                                    }
+                                }
+                            }
                         }
-                        if (templateName !== 'None' && templateName !== 'Claude') {
-                            const msgUnits = estimateCCMessageTokensByRender(newObj, templateName) * calibrationFactor;
-                            logger.info('Before adding new item', promptTokens.toFixed(2), 'of', ccBudget);
-                            logger.info('Message units for this object:', msgUnits.toFixed(2));
-                            newItemTokens = msgUnits;
+
+                        if (promptTokens + newItemTokens <= ccBudget) {
+                            promptTokens += newItemTokens;
+                            CCMessageObj.push(newObj)
+                            ChatObjsInPrompt.push(obj)
+                            logger.info(`added new item ${i} of ${chatHistory.length}, tokens ${newItemTokens.toFixed(2)}, prompt tokens: ~${promptTokens.toFixed(2)}`);
+                            logger.info(`--------------------------------`);
                         } else {
-                            newItemTokens = estimateMessageTokens_CC(newObj, templateName);
-                        }
-
-                        if (isClaude) { //for Claude
-                            //logger.warn(JSON.stringify(obj))
-                            if (shouldAddD4 === true) {
-                                logger.info('added d4')
-                                newObj.content = D4ANObj.content + `\n` + newObj.content
-                                D4Added = true
-                                shouldAddD4 = false
-                                logger.info(newObj.content)
-                            }
-                            if (shouldAddD1 === true) {
-                                logger.info('added d1')
-                                newObj.content = D1JBObj.content + `\n` + newObj.content
-                                D1Added = true
-                                shouldAddD1 = false
-                            }
-                            if (shouldAddD0PH === true) {
-                                logger.info('added D0PH')
-                                newObj.content = D0PHObj.content + `\n` + newObj.content
-                                D0PHAdded = true
-                                shouldAddD0PH = false
-                            }
-                            logger.error(chatHistory[i - 1]);
-                            if (chatHistory[i].role === obj.entity) { // if prev and current are both 'user'
-                                chatHistory[i].content = chatHistory[i - 1]?.content + `\n` + obj.content //just combine the content
-                            }
-                            else {
-                                newObj = {
-                                    role: 'user',
-                                    content: postProcessText(obj.content),
-                                    __kind: 'history'
-                                }
-                                if (templateName !== 'None' && templateName !== 'Claude') {
-                                    const msgUnits = estimateCCMessageTokensByRender(newObj, templateName) * calibrationFactor;
-                                    logger.info('Message units for this object:', msgUnits.toFixed(2));
-                                    newItemTokens = msgUnits;
-                                } else {
-                                    logger.info(`ESTIMATING CC MESSAGE TOKENS BY CHAR! ---- CC templateName for token Estimation: ${templateName}`);
-                                    newItemTokens = estimateMessageTokens_CC(newObj, templateName);
-                                }
-                            }
+                            logger.info('ran out of context space (CC budget)', { promptTokens, newItemTokens, ccBudget })
+                            break;
                         }
                     }
-
-                    if (promptTokens + newItemTokens <= ccBudget) {
-                        promptTokens += newItemTokens;
-                        CCMessageObj.push(newObj)
-                        ChatObjsInPrompt.push(obj)
-                        logger.info(`added new item ${i} of ${chatHistory.length}, tokens ${newItemTokens.toFixed(2)}, prompt tokens: ~${promptTokens.toFixed(2)}`);
-                        logger.info(`--------------------------------`);
-                    } else {
-                        logger.info('ran out of context space (CC budget)', { promptTokens, newItemTokens, ccBudget })
-                        break;
-                    }
-                }
                 }
                 // In remote mode, skip local assembly; we'll assemble/cull below
                 if (!remoteMode) {
@@ -1459,7 +1459,7 @@ async function getModelList(api, liveConfig = null) {
     if (isClaude) {
         headers['anthropic-version'] = '2023-06-01';
     }
-    
+
     if (isGemini) {
         // Gemini uses key in URL, avoiding headers to prevent potential conflicts
         delete headers['x-api-key'];
@@ -1478,16 +1478,16 @@ async function getModelList(api, liveConfig = null) {
 
     if (response.status === 200) {
         let responseJSON = await response.json();
-        let modelNames = []; 
+        let modelNames = [];
 
         if (responseJSON.models) {
-             // Gemini format: { models: [{ name: "models/gemini-pro", ... }] }
-             modelNames = responseJSON.models.map(item => item.name.replace('models/', ''));
+            // Gemini format: { models: [{ name: "models/gemini-pro", ... }] }
+            modelNames = responseJSON.models.map(item => item.name.replace('models/', ''));
         } else if (responseJSON.data) {
-             // Standard OpenAI format: { data: [{ id: "model-id", ... }] }
-             modelNames = responseJSON.data.map(item => item.id);
+            // Standard OpenAI format: { data: [{ id: "model-id", ... }] }
+            modelNames = responseJSON.data.map(item => item.id);
         } else {
-             logger.warn('Got 200 OK but unknown model list format:', responseJSON);
+            logger.warn('Got 200 OK but unknown model list format:', responseJSON);
         }
 
         logger.info('Available models:');
@@ -1508,6 +1508,11 @@ async function tryLoadModel(api, liveConfig, liveAPI) {
     if (api.gemini || liveAPI.gemini) return;
 
     logger.info(`[tryLoadModel] >> GO`)
+
+    if (!liveConfig.APIConfig) {
+        logger.warn('[tryLoadModel] No API configured');
+        return { success: false, error: 'No API configured' };
+    }
 
     let isClaude = api.isClaude
     let modelLoadEndpoint = api.endpoint
@@ -1665,9 +1670,17 @@ async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, include
         if (!selectedModel || selectedModel === 'null' || selectedModel === 'undefined') {
             selectedModel = 'gemini-2.5-flash';
         }
-        
+
         logger.info('Detected Gemini API, converting request format...');
-        
+
+        // Log the messages array for debugging
+        logger.info(`[Gemini] Messages array type: ${Array.isArray(finalApiCallParams.messages) ? 'array' : typeof finalApiCallParams.messages}`);
+        logger.info(`[Gemini] Messages count: ${finalApiCallParams.messages?.length || 0}`);
+        if (finalApiCallParams.messages && finalApiCallParams.messages.length > 0) {
+            logger.info(`[Gemini] First message: ${JSON.stringify(finalApiCallParams.messages[0])}`);
+            logger.info(`[Gemini] Last message: ${JSON.stringify(finalApiCallParams.messages[finalApiCallParams.messages.length - 1])}`);
+        }
+
         // Build Gemini-specific endpoint URL
         // Format: https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=API_KEY
         // Or for streaming: :streamGenerateContent?alt=sse&key=API_KEY
@@ -1676,7 +1689,7 @@ async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, include
             // If using a proxy, construct the URL differently
             geminiBaseURL = baseURL;
         }
-        
+
         const streamSuffix = isStreaming ? ':streamGenerateContent?alt=sse' : ':generateContent?';
         if (geminiBaseURL.includes('generativelanguage.googleapis.com')) {
             chatURL = `${geminiBaseURL}models/${selectedModel}${streamSuffix}&key=${key}`;
@@ -1684,13 +1697,13 @@ async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, include
             // For proxy endpoints, assume they handle the routing
             chatURL = baseURL + (isStreaming ? 'stream' : 'generate');
         }
-        
+
         // Convert OpenAI-style messages to Gemini format
         // Gemini format: { contents: [{ role: "user", parts: [{ text: "..." }] }] }
         const geminiContents = [];
         let systemInstruction = null;
-        
-        if (Array.isArray(finalApiCallParams.messages)) {
+
+        if (Array.isArray(finalApiCallParams.messages) && finalApiCallParams.messages.length > 0) {
             for (const msg of finalApiCallParams.messages) {
                 if (msg.role === 'system') {
                     // Gemini uses systemInstruction for system prompts
@@ -1709,7 +1722,30 @@ async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, include
                 }
             }
         }
-        
+
+        // Gemini requires at least one user/model message in contents
+        // If we only have system messages, we need to add a placeholder
+        if (geminiContents.length === 0) {
+            logger.warn('[Gemini] No user/assistant messages found, only system messages. Adding placeholder user message.');
+            // Add a minimal user message to satisfy Gemini's requirement
+            geminiContents.push({
+                role: 'user',
+                parts: [{ text: 'Continue.' }]
+            });
+        }
+
+        // Gemini requires the last message to be from user role (not model/assistant)
+        // If the last message is from model, add a continuation prompt
+        if (geminiContents.length > 0 && geminiContents[geminiContents.length - 1].role === 'model') {
+            logger.warn('[Gemini] Last message is from model role. Adding user continuation prompt.');
+            geminiContents.push({
+                role: 'user',
+                parts: [{ text: 'Continue.' }]
+            });
+        }
+
+        logger.info(`[Gemini] Built ${geminiContents.length} content entries for request`);
+
         // Build Gemini request body
         const geminiParams = {
             contents: geminiContents,
@@ -1720,25 +1756,25 @@ async function requestToTCorCC(isStreaming, liveAPI, finalApiCallParams, include
                 topK: finalApiCallParams.top_k || 40,
             }
         };
-        
+
         // Add system instruction if present
         if (systemInstruction) {
             geminiParams.systemInstruction = systemInstruction;
         }
-        
+
         // Add stop sequences if present
         if (finalApiCallParams.stop && Array.isArray(finalApiCallParams.stop) && finalApiCallParams.stop.length > 0) {
             geminiParams.generationConfig.stopSequences = finalApiCallParams.stop.slice(0, 5); // Gemini supports up to 5
         }
-        
+
         // Replace the params with Gemini format
         finalApiCallParams = geminiParams;
-        
+
         // Gemini doesn't use Authorization header for API key (it's in the URL)
         headers = {
             'Content-Type': 'application/json',
         };
-        
+
         logger.info(`Gemini request URL: ${chatURL}`);
     }
 
@@ -1847,11 +1883,11 @@ async function processResponse(response, isCCSelected, isTest, isStreaming, live
         //logger.info(JSONResponse) 
         //logger.info(`isCCSelected? ${isCCSelected}`)
         //logger.info(`isTest? ${isTest}`)
-        
+
         // Handle Gemini format
         if (JSONResponse.candidates && JSONResponse.candidates.length > 0) {
             text = JSONResponse.candidates[0].content.parts[0].text;
-        } 
+        }
         else if (isCCSelected) {
             if (isClaude) {
                 text = JSONResponse.completion;

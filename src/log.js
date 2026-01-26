@@ -54,5 +54,6 @@ const apiLogger = wrapLogger(rawApiLogger);
 const fileLogger = wrapLogger(rawFileLogger);
 const charLogger = wrapLogger(rawCharLogger);
 
+console.log("Logger initialized");
 
 export { logger, dbLogger, apiLogger, fileLogger, charLogger };

@@ -343,6 +343,11 @@ async function toggleCheckbox(value, elementID) {
   //console.debug(`${elementID} previous state:`, $(`#${elementID}`).prop("checked"));
   //console.debug(elementID, ' incoming value:', value);
 
+  // Default undefined to false for checkboxes
+  if (value === undefined || value === null) {
+    value = false;
+  }
+
   if (Number.isInteger(value)) {
     //console.debug('Received integer for checkbox value:', elementID, value);
   }
@@ -813,38 +818,18 @@ function bindDynamicCharacterEvents() {
     // If currently streaming, ignore to avoid overlapping operations
     if ($('body').hasClass('currentlyStreaming')) return;
 
-    // Detect if the last AI message author matches this slot's character display name
-    const $lastAI = $("#AIChat").find("div[data-entitytype='AI']").last();
-    const isLastFromAI = $lastAI && $lastAI.length > 0;
-    let lastAuthor = null;
-    if (isLastFromAI) {
-      const nae = String($lastAI.attr('data-name-and-entity') || '');
-      const dashIdx = nae.lastIndexOf('-');
-      lastAuthor = dashIdx >= 0 ? nae.substring(0, dashIdx) : nae;
-    }
+    // Force reply ALWAYS generates a fresh response from this character
+    // This ensures the character speaks even if they just spoke, or if
+    // another character was last to speak. No continuation logic here.
+    console.log(`[ForceReply] Forcing response from ${sel.displayName}`);
 
-    if (isLastFromAI && lastAuthor && sel.displayName && lastAuthor === sel.displayName) {
-      // Treat as a continuation of the last AI message from this character
-      const mesID = $lastAI.data('messageid');
-      const sessionID = $lastAI.data('sessionid');
-      // Remove inline continue icon pre-send so it doesn't enter the prompt
-      $lastAI.find('i.inlineContinue').remove();
-      util.messageServer({
-        type: 'continueFromMessage',
-        UUID: myUUID,
-        mesID,
-        sessionID
-      });
-    } else {
-      // Fallback: single, immediate response from this character only (no full queue)
-      util.messageServer({
-        type: 'requestAIResponse',
-        trigger: 'force',
-        UUID: myUUID,
-        character: { value: sel.value, displayName: sel.displayName },
-        username
-      });
-    }
+    util.messageServer({
+      type: 'requestAIResponse',
+      trigger: 'force',
+      UUID: myUUID,
+      character: { value: sel.value, displayName: sel.displayName },
+      username
+    });
   });
   $("[id^='charDefsPopupButton']").off('click.multiChar').on('click.multiChar', async function () {
     const idx = $("[id^='charDefsPopupButton']").index(this);

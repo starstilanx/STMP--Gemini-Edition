@@ -355,9 +355,12 @@ export function handleRoomJoined(data) {
         // The room config contains selectedCharacter etc.
         // Apply this config to the UI
         console.log('[Lobby] Applying room config:', data.config);
+        console.log('[Lobby] Room config selectedAPI:', data.config?.promptConfig?.selectedAPI);
+        console.log('[Lobby] Room config APIList:', data.config?.promptConfig?.APIList);
 
         // Import handleconfig to apply the room's configuration
-        import('./handleconfig.js').then(handleconfig => {
+        import('./handleconfig.js').then(module => {
+            const handleconfig = module.default;
             handleconfig.processLiveConfig({ value: data.config });
         }).catch(err => {
             console.error('[Lobby] Failed to apply room config:', err);

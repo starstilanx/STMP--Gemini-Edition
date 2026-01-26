@@ -805,7 +805,7 @@ async function connectWebSocket(username) {
       case 'lorebookEntryDeleted':
         lorebookUI.handleLorebookMessage(parsedMessage);
         break;
-      
+
       // Room/Lobby message handlers - Critical for message isolation
       case 'roomsList':
         lobby.renderRoomsList(parsedMessage.rooms);
@@ -844,7 +844,7 @@ async function connectWebSocket(username) {
         console.error('[Lobby] Room error:', parsedMessage.message);
         alert(`Room Error: ${parsedMessage.message}`);
         break;
-      
+
       // User Authentication response handlers
       case 'loginResponse':
       case 'registerResponse':
@@ -854,26 +854,26 @@ async function connectWebSocket(username) {
           localStorage.setItem('UUID', user.user_id);
           localStorage.setItem('username', user.username);
           localStorage.setItem('AIChatUsername', user.username);
-          
+
           // Update local variables
           myUUID = user.user_id;
           myUsername = user.username;
           myAIChatUsername = user.username;
           myPersona = user.persona || '';
           myUserColor = user.username_color;
-          
+
           // Update UI elements
           $('#usernameInput').val(user.username);
           $('#AIChatUsernameInput').val(user.username);
           $('#AIChatUserNameHolder').css('color', user.username_color).text(user.username);
           $('#userChatUserNameHolder').css('color', user.username_color).text(user.username);
-          
+
           // Close dialog and show success
           if (window._authDialog) {
             window._authDialog.dialog('close');
             window._authDialog = null;
           }
-          
+
           // Notify server of identity update (preserves current session and host status)
           util.messageServer({
             type: 'identityUpdate',
@@ -882,11 +882,11 @@ async function connectWebSocket(username) {
             username: user.username,
             persona: user.persona || ''
           });
-          
-          alert(parsedMessage.type === 'registerResponse' 
-            ? 'Registration successful! Your account is now linked to this session.' 
+
+          alert(parsedMessage.type === 'registerResponse'
+            ? 'Registration successful! Your account is now linked to this session.'
             : 'Login successful! Your persona and settings have been restored.');
-          
+
           // Update persona if it was restored from login
           if (user.persona) {
             myPersona = user.persona;
@@ -896,7 +896,7 @@ async function connectWebSocket(username) {
           $('#authError').text(parsedMessage.error || 'An error occurred');
         }
         break;
-      
+
       case 'checkUsernameResponse':
         // Can be used for real-time username availability checking
         console.debug('Username availability:', parsedMessage.username, parsedMessage.available);
@@ -962,9 +962,13 @@ async function connectWebSocket(username) {
         // Extract my persona
         const myUserEntry = userList.find(u => u.username === myUsername);
         if (myUserEntry) {
-             myPersona = myUserEntry.persona || "";
+          myPersona = myUserEntry.persona || "";
         }
         updateUserList('userList', userList);
+        break;
+      case "personaUpdateConfirm":
+        console.log('[Persona] Update confirmed, new value:', parsedMessage.persona);
+        myPersona = parsedMessage.persona;
         break;
       case "forceDisconnect":
         disconnectWebSocket();
@@ -1125,7 +1129,7 @@ async function connectWebSocket(username) {
         } else {
           //console.warn('not a continue, so add a new message div')
           if (!$incomingDiv.length) { // the div here is a temporary container for the streamed content. it will be replaced on stream end with the final server-canonical HTML
-          const newStreamDivSpan = $(`
+            const newStreamDivSpan = $(`
             <div class="incomingStreamDiv transition250" data-sessionid="${parsedMessage.sessionID}" data-messageid="${parsedMessage.messageID}" data-entityType="AI">
                 <div class="messageHeader flexbox justifySpaceBetween">
                     <span style="color:white" class="chatUserName">${parsedMessage.username} 🤖</span>
@@ -1733,7 +1737,7 @@ $(async function () {
   }
 
   connectWebSocket(username);
-  
+
   // Initialize lobby/room system
   lobby.initLobby();
 
@@ -1772,40 +1776,41 @@ $(async function () {
 
   // Send a message to the user chat
   $("#userProfileButton").off("click").on("click", function () {
+    console.log('[Persona Dialog] Opening with myPersona:', myPersona);
     const $dialog = $("<div>").html(`
         <textarea id="personaInput" class="width100p height100p" style="min-height: 150px; resize: none;" placeholder="Describe yourself...">${myPersona}</textarea>
     `);
-    
+
     $dialog.dialog({
-        title: "Edit User Persona",
-        modal: true,
-        width: 400,
-        height: 300,
-        buttons: {
-            "Save": function() {
-                const newPersona = $("#personaInput").val();
-                util.messageServer({
-                    type: 'updatePersona',
-                    UUID: myUUID,
-                    persona: newPersona
-                });
-                myPersona = newPersona; // Optimistic update
-                $(this).dialog("close");
-            },
-            "Cancel": function() {
-                $(this).dialog("close");
-            }
+      title: "Edit User Persona",
+      modal: true,
+      width: 400,
+      height: 300,
+      buttons: {
+        "Save": function () {
+          const newPersona = $("#personaInput").val();
+          util.messageServer({
+            type: 'updatePersona',
+            UUID: myUUID,
+            persona: newPersona
+          });
+          myPersona = newPersona; // Optimistic update
+          $(this).dialog("close");
         },
-        open: function() {
-             $(".ui-button").trigger("blur");
+        "Cancel": function () {
+          $(this).dialog("close");
         }
+      },
+      open: function () {
+        $(".ui-button").trigger("blur");
+      }
     });
   });
 
   // Login / Register button handler
   $("#loginButton").off("click").on("click", function () {
     let isLoginMode = true;
-    
+
     const $dialog = $("<div>").html(`
         <div id="authFormContainer">
             <div class="flexbox justifySpaceAround marginBot5">
@@ -1820,71 +1825,71 @@ $(async function () {
             </form>
         </div>
     `);
-    
+
     $dialog.dialog({
-        title: "Login",
-        modal: true,
-        width: 350,
-        buttons: {
-            "Submit": function() {
-                const username = $("#authUsername").val().trim();
-                const password = $("#authPassword").val();
-                const email = $("#authEmail").val().trim();
-                
-                if (!username || username.length < 3) {
-                    $("#authError").text("Username must be at least 3 characters");
-                    return;
-                }
-                if (!password || password.length < 6) {
-                    $("#authError").text("Password must be at least 6 characters");
-                    return;
-                }
-                
-                $("#authError").text("Processing...");
-                
-                if (isLoginMode) {
-                    util.messageServer({
-                        type: 'loginUser',
-                        username: username,
-                        password: password
-                    });
-                } else {
-                    util.messageServer({
-                        type: 'registerUser',
-                        username: username,
-                        password: password,
-                        email: email || null
-                    });
-                }
-            },
-            "Cancel": function() {
-                $(this).dialog("close");
-            }
+      title: "Login",
+      modal: true,
+      width: 350,
+      buttons: {
+        "Submit": function () {
+          const username = $("#authUsername").val().trim();
+          const password = $("#authPassword").val();
+          const email = $("#authEmail").val().trim();
+
+          if (!username || username.length < 3) {
+            $("#authError").text("Username must be at least 3 characters");
+            return;
+          }
+          if (!password || password.length < 6) {
+            $("#authError").text("Password must be at least 6 characters");
+            return;
+          }
+
+          $("#authError").text("Processing...");
+
+          if (isLoginMode) {
+            util.messageServer({
+              type: 'loginUser',
+              username: username,
+              password: password
+            });
+          } else {
+            util.messageServer({
+              type: 'registerUser',
+              username: username,
+              password: password,
+              email: email || null
+            });
+          }
         },
-        open: function() {
-            $(".ui-button").trigger("blur");
-            
-            // Tab switching
-            $("#authLoginTab").on("click", function() {
-                isLoginMode = true;
-                $(this).addClass("active");
-                $("#authRegisterTab").removeClass("active");
-                $("#authEmail").hide();
-                $dialog.dialog("option", "title", "Login");
-                $("#authError").text("");
-            });
-            
-            $("#authRegisterTab").on("click", function() {
-                isLoginMode = false;
-                $(this).addClass("active");
-                $("#authLoginTab").removeClass("active");
-                $("#authEmail").show();
-                $dialog.dialog("option", "title", "Register");
-                $("#authError").text("");
-            });
+        "Cancel": function () {
+          $(this).dialog("close");
         }
+      },
+      open: function () {
+        $(".ui-button").trigger("blur");
+
+        // Tab switching
+        $("#authLoginTab").on("click", function () {
+          isLoginMode = true;
+          $(this).addClass("active");
+          $("#authRegisterTab").removeClass("active");
+          $("#authEmail").hide();
+          $dialog.dialog("option", "title", "Login");
+          $("#authError").text("");
+        });
+
+        $("#authRegisterTab").on("click", function () {
+          isLoginMode = false;
+          $(this).addClass("active");
+          $("#authLoginTab").removeClass("active");
+          $("#authEmail").show();
+          $dialog.dialog("option", "title", "Register");
+          $("#authError").text("");
+        });
+      }
     });
-    
+
     // Store reference to dialog for WebSocket response handlers
     window._authDialog = $dialog;
   });

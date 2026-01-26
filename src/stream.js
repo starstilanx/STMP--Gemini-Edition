@@ -1,6 +1,6 @@
 import { logger } from './log.js';
 import api from './api-calls.js';
-import { broadcast, broadcastToRoom, purifier } from '../server.js';
+import { broadcast, broadcastToRoom, purifier } from '../socket-old.js';
 import db from './db.js';
 import { StringDecoder } from 'string_decoder';
 import { Readable } from 'stream';
@@ -137,7 +137,8 @@ const createTextListener = async (parsedMessage, liveConfig, AIChatUserList, use
                 await db.editMessage(targetSessionID, targetMessageID, trimmed);
             } else {
                 // Pass roomId for room-scoped chat isolation
-                await db.writeAIChatMessage(liveConfig.promptConfig.selectedCharacterDisplayName, 'AI', trimmed, 'AI', parsedMessage?.roomId);
+                // Use character name as userId for proper character tracking
+                await db.writeAIChatMessage(liveConfig.promptConfig.selectedCharacterDisplayName, liveConfig.promptConfig.selectedCharacterDisplayName, trimmed, 'AI', parsedMessage?.roomId);
             }
         } catch (e) {
             logger.warn('Failed to persist streamed response to DB:', e?.message || e);
@@ -158,10 +159,10 @@ const createTextListener = async (parsedMessage, liveConfig, AIChatUserList, use
                 )
             ),
             type: 'streamedAIResponseEnd',
-                // preserve targeting so client can finalize the correct node
-                sessionID: parsedMessage?.continueTarget?.sessionID || sessionID,
-                messageID: parsedMessage?.continueTarget?.mesID || messageID,
-                    timestamp: new Date().toISOString()
+            // preserve targeting so client can finalize the correct node
+            sessionID: parsedMessage?.continueTarget?.sessionID || sessionID,
+            messageID: parsedMessage?.continueTarget?.mesID || messageID,
+            timestamp: new Date().toISOString()
         };
         //logger.warn('sending stream end')
         // ROOM-SCOPED: Use broadcastToRoom if room context available
@@ -175,7 +176,8 @@ const createTextListener = async (parsedMessage, liveConfig, AIChatUserList, use
             characterDisplayName: liveConfig.promptConfig.selectedCharacterDisplayName,
             characterValue: liveConfig.promptConfig.selectedCharacter,
             chatID: parsedMessage.chatID,
-            streamed: true
+            streamed: true,
+            roomId: parsedMessage.roomId || null
         });
         //}
     };
@@ -310,8 +312,9 @@ async function handleResponse(parsedMessage, selectedAPI, hordeKey, engineMode, 
 
         const trimmed = api.trimIncompleteSentences(AIResponse);
         // Persist and capture DB-assigned message_id and timestamp (with room context)
+        // Use character name as userId for proper character tracking
         const writeMeta = await db.writeAIChatMessage(
-            liveConfig.promptConfig.selectedCharacterDisplayName, 'AI', trimmed, 'AI', parsedMessage?.roomId
+            liveConfig.promptConfig.selectedCharacterDisplayName, liveConfig.promptConfig.selectedCharacterDisplayName, trimmed, 'AI', parsedMessage?.roomId
         );
         if (writeMeta) {
             AIResponseMessage.sessionID = writeMeta.sessionId;
@@ -329,7 +332,8 @@ async function handleResponse(parsedMessage, selectedAPI, hordeKey, engineMode, 
             characterDisplayName: liveConfig.promptConfig.selectedCharacterDisplayName,
             characterValue: liveConfig.promptConfig.selectedCharacter,
             chatID: parsedMessage.chatID,
-            streamed: false
+            streamed: false,
+            roomId: parsedMessage.roomId || null
         });
     }
 }
@@ -423,8 +427,8 @@ async function processStreamedResponse(response, isCCSelected, isTest, isClaude,
             } else if (jsonData.candidates && jsonData.candidates.length > 0) {
                 // Gemini streaming format
                 if (jsonData.candidates[0].content && jsonData.candidates[0].content.parts && jsonData.candidates[0].content.parts.length > 0) {
-                     text = jsonData.candidates[0].content.parts[0].text;
-                     textEmitter.emit('text', text);
+                    text = jsonData.candidates[0].content.parts[0].text;
+                    textEmitter.emit('text', text);
                 }
             } else {
                 if (isClaude) {

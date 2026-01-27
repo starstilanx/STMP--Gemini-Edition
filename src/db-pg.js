@@ -39,6 +39,8 @@ pool.query('SELECT NOW()', (err, res) => {
     logger.info('PostgreSQL connected successfully at', res.rows[0].now);
 });
 
+
+
 // =============================================================================
 // WRITE QUEUE FOR SERIALIZATION
 // =============================================================================
@@ -177,10 +179,17 @@ async function upsertUserRole(uuid, role) {
 
 async function getUser(uuid) {
     const result = await pool.query(
-        'SELECT * FROM users WHERE user_id = $1',
+        'SELECT user_id, username, username_color, persona, created_at, last_seen_at FROM users WHERE user_id = $1',
         [uuid]
     );
     return result.rows[0];
+}
+
+async function getUsers() {
+    const result = await pool.query(
+        'SELECT username, username_color FROM users'
+    );
+    return result.rows;
 }
 
 async function getUserByUsername(username) {
@@ -368,6 +377,13 @@ async function getLatestCharacter() {
     return result.rows[0];
 }
 
+async function getCharacters() {
+    const result = await pool.query(
+        'SELECT * FROM characters'
+    );
+    return result.rows[0];
+}
+
 async function getCharacterColor(charName) {
     const result = await pool.query(
         'SELECT display_color FROM characters WHERE displayname = $1',
@@ -547,128 +563,34 @@ async function writeUserChatMessage(userId, message, roomId = null) {
     }, []);
 }
 
-async function readAIChat(sessionID = null, roomId = null) {
-    let query, params;
-
-    if (sessionID) {
-        logger.info(`[readAIChat] Reading AI chat for sessionID: ${sessionID}`);
-        query = `
-            SELECT
-                a.message_id,
-                a.session_id,
-                a.user_id,
-                a.username,
-                a.message AS content,
-                a.entity,
-                a.timestamp,
-                u.persona AS "userPersona"
-            FROM aichats a
-            LEFT JOIN users u ON a.user_id = u.user_id
-            WHERE a.session_id = $1
-            ORDER BY a.message_id ASC
-        `;
-        params = [sessionID];
-    } else if (roomId) {
-        logger.info(`[readAIChat] Finding active session for roomId: ${roomId}`);
-        const activeSessionResult = await pool.query(
-            'SELECT session_id FROM sessions WHERE room_id = $1 AND is_active = TRUE LIMIT 1',
-            [roomId]
-        );
-        const activeSession = activeSessionResult.rows[0]?.session_id;
-
-        if (!activeSession) {
-            logger.warn(`[readAIChat] No active session found for room ${roomId}`);
-            return [JSON.stringify([]), null];
-        }
-
-        logger.info(`[readAIChat] Found active session ${activeSession} for room ${roomId}`);
-
-        query = `
-            SELECT
-                a.message_id,
-                a.session_id,
-                a.user_id,
-                a.username,
-                a.message AS content,
-                a.entity,
-                a.timestamp,
-                u.persona AS "userPersona"
-            FROM aichats a
-            LEFT JOIN users u ON a.user_id = u.user_id
-            WHERE a.session_id = $1
-            ORDER BY a.message_id ASC
-        `;
-        params = [activeSession];
-    } else {
-        const activeSessionResult = await pool.query(
-            'SELECT session_id FROM sessions WHERE is_active = TRUE LIMIT 1'
-        );
-        const activeSession = activeSessionResult.rows[0]?.session_id;
-
-        if (!activeSession) {
-            return [JSON.stringify([]), null];
-        }
-
-        query = `
-            SELECT
-                a.message_id,
-                a.session_id,
-                a.user_id,
-                a.username,
-                a.message AS content,
-                a.entity,
-                a.timestamp,
-                u.persona AS "userPersona"
-            FROM aichats a
-            LEFT JOIN users u ON a.user_id = u.user_id
-            WHERE a.session_id = $1
-            ORDER BY a.message_id ASC
-        `;
-        params = [activeSession];
-    }
-
-    const result = await pool.query(query, params);
-    logger.info(`[readAIChat] Found ${result.rows.length} messages for session ${params[0]}`);
-    if (result.rows.length > 0) {
-        logger.debug(`[readAIChat] First message: ${JSON.stringify(result.rows[0])}`);
-    }
-    return [JSON.stringify(result.rows), result.rows[0]?.session_id || null];
+async function readAIChat() {
+    logger.info(`[readAIChat] Reading AI chat for `);
+    const result = await pool.query(`
+        SELECT
+            a.message_id,
+            a.user_id,
+            a.username,
+            a.message AS content,
+            a.entity,
+            a.timestamp
+        FROM aichats a
+        ORDER BY a.timestamp ASC
+    `);
+    return result.rows;
 }
 
-async function readUserChat(roomId = null) {
-    let activeSession;
-    if (roomId) {
-        const sessionResult = await pool.query(
-            'SELECT session_id FROM "userSessions" WHERE room_id = $1 AND is_active = TRUE LIMIT 1',
-            [roomId]
-        );
-        activeSession = sessionResult.rows[0]?.session_id;
-    } else {
-        const sessionResult = await pool.query(
-            'SELECT session_id FROM "userSessions" WHERE is_active = TRUE LIMIT 1'
-        );
-        activeSession = sessionResult.rows[0]?.session_id;
-    }
-
-    if (!activeSession) {
-        return [JSON.stringify([]), null];
-    }
-
+async function readUserChat() {
     const result = await pool.query(
         `SELECT
             message_id,
-            session_id,
             user_id,
             message AS content,
             timestamp,
             active
          FROM userchats
-         WHERE session_id = $1 AND active = TRUE
-         ORDER BY message_id ASC`,
-        [activeSession]
+         ORDER BY timestamp ASC`
     );
-
-    return [JSON.stringify(result.rows), activeSession];
+    return result.rows;
 }
 
 async function getMessage(messageID, sessionID) {
@@ -1336,6 +1258,18 @@ async function createRoom(name, description = '', createdBy = null, settings = {
     }, []);
 }
 
+async function getRooms() {
+    try {
+        const result = await pool.query(
+            'SELECT * FROM rooms WHERE is_active = TRUE'
+        );
+        return result.rows;
+    } catch (error) {
+        logger.error('Error getting rooms:', error);
+        return [];
+    }
+}
+
 async function getRoomById(roomId) {
     try {
         const result = await pool.query(
@@ -1571,6 +1505,7 @@ export default {
     upsertUser,
     upsertUserRole,
     getUser,
+    getUsers,
     getUserByUsername,
     checkUsernameAvailable,
     getUserColor,
@@ -1579,6 +1514,7 @@ export default {
 
     // Character management
     upsertChar,
+    getCharacters,
     getLatestCharacter,
     getCharacterColor,
     syncCharactersToDatabase,
@@ -1630,6 +1566,7 @@ export default {
 
     // Room management
     createRoom,
+    getRooms,
     getRoomById,
     getAllActiveRooms,
     updateRoomSettings,

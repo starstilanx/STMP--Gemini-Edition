@@ -2,8 +2,12 @@ import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
 import router from './src/db_routes.js';
+import path from 'path';
+import { logger } from './src/log.js';
+import { fileURLToPath } from 'url';
 
-
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 const localApp = express();
 
 
@@ -17,8 +21,7 @@ localApp.use('/api', router);
 localApp.get('/', async (req, res) => {
     const filePath = path.join(__dirname, 'public/client.html');
     try {
-        const data = await readFile(filePath, 'utf8');
-        res.status(200).send(data);
+        res.sendFile(filePath);
     } catch (err) {
         logger.error('Error loading client HTML:', err);
         res.status(500).send('Error loading the client HTML file');

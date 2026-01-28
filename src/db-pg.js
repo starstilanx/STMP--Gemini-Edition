@@ -236,11 +236,20 @@ async function getUserColor(UUID) {
 
 async function insertUser(uuid, username, hashedPassword) {
     const client = await pool.connect();
-    await client.query(
-        'INSERT INTO users (user_id, username, password_hash) VALUES ($1, $2, $3)',
-        [uuid, username, hashedPassword]
-    );
-    logger.info(`new user registered with uuid: ${{uuid}}`)
+    // const oldusername = await pool.query(
+    //     'SELECT username, user_id FROM users'
+    // );
+
+    // if (!oldusername.username) {
+        await client.query(
+            'INSERT INTO users (user_id, username, password_hash) VALUES ($1, $2, $3)',
+            [uuid, username, hashedPassword]
+        );
+        logger.info(`new user registered with uuid: ${{ uuid }}`)
+    // }
+    // else {
+    //     logger.warn("user registration failed")
+    // }
 }
 
 //sus new end

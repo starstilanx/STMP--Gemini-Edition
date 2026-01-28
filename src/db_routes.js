@@ -40,26 +40,21 @@ router.get('/users/:user_id', async (req, res) => {
 
 router.post('/users/register', async (req, res) => {
     const { flag, ...payload } = req.body;
-    // if (flag === 'register') {
         try {
             const { username, password } = payload;
             if (!username || !password) {
                 return res.status(400).json({ error: 'Username and password are required' });
             }
             const result = await auth.register(username, password);
-            logger.info(`new user registered with`)
-            return res.json(result);
+            return res.status(200).send("Registration success");
         } catch (err) {
             logger.error('Error in /users (register):', err);
             return res.status(500).json({ error: err.message });
         }
-    // }
-    // res.status(400).send('Unsupported or missing flag');
 });
 
 router.post('/users/login', async (req, res) => {
     const { flag, ...payload } = req.body;
-    // if (flag === 'login') {
         try {
             const { username, password } = payload;
             if (!username || !password) {
@@ -71,8 +66,6 @@ router.post('/users/login', async (req, res) => {
             logger.error('Error in /users (login):', err);
             return res.status(500).json({ error: err.message });
         }
-    // }
-    // res.status(400).send('Unsupported or missing flag');
 });
 
 

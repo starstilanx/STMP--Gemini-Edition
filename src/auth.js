@@ -1,6 +1,6 @@
 import database from "./db-loader.js";
 import { config } from 'dotenv';
-import { dbLogger as logger } from './log.js';
+import { logger } from './log.js';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 
@@ -16,16 +16,37 @@ function genSecret() {
     return Buffer.from(crypto.randomBytes(32)).toString('hex');
 }
 
+function checkPasswordStyle(password) {
+    return /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{8,32}$/.test(password);
+}
+
 //TODO improve user responsiveness
 async function register(username, password) {
     const hashedPassword = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
     const uuid = genUUID();
     try {
-        await database.insertUser(uuid, username, hashedPassword);
+        const susUsername = await database.checkUsernameAvailable()
+        const susPassword = checkPasswordStyle(password);
+        if (susUsername) {
+            await database.insertUser(uuid, username, hashedPassword);
 
-        const secret = genSecret();
+            const secret = genSecret();
 
-        secrets.set(secret, {uuid: uuid, username: username});
+            secrets.set(secret, {uuid: uuid, username: username});
+            logger.info(`new user registered with username: ${username}`);
+        }
+        else if (susPassword) {
+            await database.insertUser(uuid, username, hashedPassword);
+
+            const secret = genSecret();
+
+            secrets.set(secret, {uuid: uuid, username: username});
+            logger.info(`new user registered with username: ${username}`);
+        }
+        else {
+            logger.warn('User already registered');
+            return null;
+        }
     } catch (error) {
         console.error(error);
         return null;
@@ -37,20 +58,27 @@ async function authenticate(username, password) {
     try {
         const gotUsername = await database.getUserAuth(username)
         if (!gotUsername) {
+            logger.info("Wrong username input")
             return {
                 success: false,
-                failure: "Username doesn't exists",
+                failure: "Username doesn't exist",
             };
         }
         const isCorrect = bcrypt.compareSync(password, gotUsername.password_hash);
         if (!isCorrect) {
+            logger.info("Wrong password input")
+
             return {
                 success: false,
                 failure: "lol get rekd",
             };
         }
-        const secret = genSecret();
+        const secret = {
+            value:genSecret()
+        };
         secrets.set(secret, {uuid: gotUsername.user_id, username: username});
+        logger.info("secret set")
+
         return {
             success: true,
             secret: secret,

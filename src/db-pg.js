@@ -235,10 +235,12 @@ async function getUserColor(UUID) {
 //MARK:sus new
 
 async function insertUser(uuid, username, hashedPassword) {
+    const client = await pool.connect();
     await client.query(
         'INSERT INTO users (user_id, username, password_hash) VALUES ($1, $2, $3)',
         [uuid, username, hashedPassword]
     );
+    logger.info(`new user registered with uuid: ${{uuid}}`)
 }
 
 //sus new end

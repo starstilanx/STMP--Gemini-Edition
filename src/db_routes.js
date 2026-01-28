@@ -17,13 +17,11 @@ router.get('/users', async (req, res) => {
         res.status(403).send("Unauthorised");
         return
     }
-
     try {
-        // Custom query to exclude password_hash for security? 
-        // For now, mirroring universal behavior but explicit endpoint
         const data = await database.getUsers();
         res.json(data);
-    } catch (err) {
+    }
+    catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
@@ -40,27 +38,43 @@ router.get('/users/:user_id', async (req, res) => {
     }
 });
 
-router.post('/users', async (req, res) => {
+router.post('/users/register', async (req, res) => {
     const { flag, ...payload } = req.body;
-
-
-
-    if (flag === 'register') {
+    // if (flag === 'register') {
         try {
             const { username, password } = payload;
             if (!username || !password) {
                 return res.status(400).json({ error: 'Username and password are required' });
             }
-            const result = await database.registerUser(username, password);
+            const result = await auth.register(username, password);
+            logger.info(`new user registered with`)
             return res.json(result);
         } catch (err) {
             logger.error('Error in /users (register):', err);
             return res.status(500).json({ error: err.message });
         }
-    }
-
-    res.status(400).json({ error: 'Unsupported or missing flag' });
+    // }
+    // res.status(400).send('Unsupported or missing flag');
 });
+
+router.post('/users/login', async (req, res) => {
+    const { flag, ...payload } = req.body;
+    // if (flag === 'login') {
+        try {
+            const { username, password } = payload;
+            if (!username || !password) {
+                return res.status(400).json({ error: 'Username and password are required' });
+            }
+            const result = await auth.authenticate(username, password);
+            return res.json(result);
+        } catch (err) {
+            logger.error('Error in /users (login):', err);
+            return res.status(500).json({ error: err.message });
+        }
+    // }
+    // res.status(400).send('Unsupported or missing flag');
+});
+
 
 // --- Chat Data ---
 router.get('/aichats', async (req, res) => {

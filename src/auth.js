@@ -42,7 +42,7 @@ async function authenticate(username, password) {
                 failure: "Username doesn't exists",
             };
         }
-        const isCorrect = bcrypt.compareSync(username, gotUsername.password_hash);
+        const isCorrect = bcrypt.compareSync(password, gotUsername.password_hash);
         if (!isCorrect) {
             return {
                 success: false,
@@ -52,7 +52,8 @@ async function authenticate(username, password) {
         const secret = genSecret();
         secrets.set(secret, {uuid: gotUsername.user_id, username: username});
         return {
-            success: true, secret: secret,
+            success: true,
+            secret: secret,
         }
 
     } catch (error) {

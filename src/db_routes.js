@@ -1,6 +1,7 @@
 import express from 'express';
 import { dbLogger as logger } from './log.js';
 import database from './db-loader.js';
+import auth from "./auth.js";
 
 const router = express.Router();
 
@@ -11,6 +12,12 @@ const router = express.Router();
 
 // --- Users ---
 router.get('/users', async (req, res) => {
+    const user = auth.verified(req.query.secret)
+    if (!user) {
+        res.status(403).send("Unauthorised");
+        return
+    }
+
     try {
         // Custom query to exclude password_hash for security? 
         // For now, mirroring universal behavior but explicit endpoint
@@ -31,6 +38,28 @@ router.get('/users/:user_id', async (req, res) => {
         logger.error('Error in /users/:user_id:', err);
         res.status(500).json({ error: err.message });
     }
+});
+
+router.post('/users', async (req, res) => {
+    const { flag, ...payload } = req.body;
+
+
+
+    if (flag === 'register') {
+        try {
+            const { username, password } = payload;
+            if (!username || !password) {
+                return res.status(400).json({ error: 'Username and password are required' });
+            }
+            const result = await database.registerUser(username, password);
+            return res.json(result);
+        } catch (err) {
+            logger.error('Error in /users (register):', err);
+            return res.status(500).json({ error: err.message });
+        }
+    }
+
+    res.status(400).json({ error: 'Unsupported or missing flag' });
 });
 
 // --- Chat Data ---

@@ -185,6 +185,14 @@ async function getUser(uuid) {
     return result.rows[0];
 }
 
+async function getUserAuth(username) {
+    const result = await pool.query(
+        'SELECT user_id, created_at, last_seen_at, password_hash FROM users WHERE username = $1',
+        [username]
+    );
+    return result.rows[0];
+}
+
 async function getUsers() {
     const result = await pool.query(
         'SELECT username, username_color FROM users'
@@ -224,8 +232,17 @@ async function getUserColor(UUID) {
 // =============================================================================
 // AUTHENTICATION
 // =============================================================================
+//MARK:sus new
 
-async function registerUser(username, password, email = null) {
+async function insertUser(uuid, username, hashedPassword) {
+    await client.query(
+        'INSERT INTO users (user_id, username, password_hash) VALUES ($1, $2, $3)',
+        [uuid, username, hashedPassword]
+    );
+}
+
+//sus new end
+async function registerUser(username, password) {
     logger.info('Registering new user:', username);
 
     const existing = await getUserByUsername(username);
@@ -239,9 +256,9 @@ async function registerUser(username, password, email = null) {
 
                     await client.query(
                         `UPDATE users
-                         SET password_hash = $1, email = $2, last_seen_at = $3
-                         WHERE user_id = $4`,
-                        [password_hash, email, updated_at, existing.user_id]
+                         SET password_hash = $1, last_seen_at = $2
+                         WHERE user_id = $3`,
+                        [password_hash, updated_at, existing.user_id]
                     );
 
                     logger.info('Guest account upgraded successfully:', username);
@@ -252,7 +269,6 @@ async function registerUser(username, password, email = null) {
                             username: existing.username,
                             username_color: existing.username_color,
                             persona: existing.persona || '',
-                            email,
                             role: existing.role || 'user',
                             created_at: existing.created_at
                         }
@@ -568,9 +584,10 @@ async function readAIChat() {
     const result = await pool.query(`
         SELECT
             a.message_id,
+            a.room_id,
             a.user_id,
             a.username,
-            a.message AS content,
+            a.message,
             a.entity,
             a.timestamp
         FROM aichats a
@@ -583,8 +600,9 @@ async function readUserChat() {
     const result = await pool.query(
         `SELECT
             message_id,
+            room_id,
             user_id,
-            message AS content,
+            message,
             timestamp,
             active
          FROM userchats
@@ -1511,6 +1529,9 @@ export default {
     getUserColor,
     registerUser,
     authenticateUser,
+
+    insertUser,
+    getUserAuth,
 
     // Character management
     upsertChar,

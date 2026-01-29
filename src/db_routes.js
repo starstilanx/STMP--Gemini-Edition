@@ -38,6 +38,36 @@ router.get('/users/:user_id', async (req, res) => {
     }
 });
 
+//TODO compare all secrets
+router.get('/checkcookie', async (req, res) => {
+    const frontCookie = req.params.cookie;
+    try {
+        // const storedCookie = null;
+        // const data = auth.verified(frontCookie, auth.getStoredCookie);
+        const serverCookie = auth.getStoredCookie(frontCookie);
+        if (frontCookie === serverCookie) {
+            const data = auth.verified(frontCookie);
+        //     const susdata = data;
+            logger.info(data);
+            if (!data) {
+                res.status(200).json({valid: !data});
+                logger.info("cookie verified");
+            }
+            else {
+                res.status(403).send("Unauthorised ");
+                logger.warn(`cookie ${frontCookie} rejected`);
+            }
+        }
+        else {
+            res.status(403).send("Unauthorised");
+            logger.warn(`coookie ${frontCookie} is invalid`);
+        }
+    } catch (err) {
+        logger.error('cookie erorrrrrr', err);
+        res.status(500).json({ error: err.message });
+    }
+});
+
 router.post('/users/register', async (req, res) => {
     const { flag, ...payload } = req.body;
         try {
@@ -58,7 +88,7 @@ router.post('/users/login', async (req, res) => {
         try {
             const { username, password } = payload;
             if (!username || !password) {
-                return res.status(400).json({ error: 'Username and password are required' });
+                return res.status(400).send('Username and password are required' );
             }
             const result = await auth.authenticate(username, password);
             return res.json(result);
@@ -67,6 +97,7 @@ router.post('/users/login', async (req, res) => {
             return res.status(500).json({ error: err.message });
         }
 });
+
 
 
 // --- Chat Data ---

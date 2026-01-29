@@ -13,7 +13,7 @@ function genUUID() {
 }
 
 function genSecret() {
-    return Buffer.from(crypto.randomBytes(32)).toString('hex');
+    return Buffer.from(crypto.randomBytes(32)).toString('base64');
 }
 
 function checkPasswordStyle(password) {
@@ -73,9 +73,7 @@ async function authenticate(username, password) {
                 failure: "lol get rekd",
             };
         }
-        const secret = {
-            value:genSecret()
-        };
+        const secret = genSecret();
         secrets.set(secret, {uuid: gotUsername.user_id, username: username});
         logger.info("secret set")
 
@@ -94,11 +92,22 @@ async function authenticate(username, password) {
 }
 
 function verified(secret) {
+    logger.info(secrets, "verified");
     return secrets.get(secret)
+}
+
+function getStoredCookie(secret) {
+    logger.info(secrets, "getStoredCookie");
+    return secrets.get(secret)
+}
+
+function logOut(secret) {
+    secrets.delete(secret)
 }
 
 export default {
     register,
     authenticate,
     verified,
+    getStoredCookie,
 }

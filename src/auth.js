@@ -92,22 +92,23 @@ async function authenticate(username, password) {
 }
 
 function verified(secret) {
-    logger.info(secrets, "verified");
+    // logger.info(secrets, "verified");
     return secrets.get(secret)
 }
 
-function getStoredCookie(secret) {
-    logger.info(secrets, "getStoredCookie");
-    return secrets.get(secret)
-}
+// function getStoredCookie(secret) {
+//     logger.info(secrets, "getStoredCookie");
+//     return secrets.get(secret)
+// }
 
 function logOut(secret) {
     secrets.delete(secret)
+    logger.warn(`Secret ${secret} deleted, user logged out`)
 }
 
 export default {
     register,
     authenticate,
     verified,
-    getStoredCookie,
+    logOut,
 }

@@ -13,7 +13,7 @@ const router = express.Router();
 // --- Users ---
 router.get('/users', async (req, res) => {
     const user = auth.verified(req.query.secret)
-    if (!user) {
+    if (!!user) {
         res.status(403).send("Unauthorised");
         return
     }
@@ -38,29 +38,30 @@ router.get('/users/:user_id', async (req, res) => {
     }
 });
 
-//TODO compare all secrets
 router.get('/checkcookie', async (req, res) => {
     const frontCookie = req.params.cookie;
+
     try {
-        // const storedCookie = null;
-        // const data = auth.verified(frontCookie, auth.getStoredCookie);
-        const serverCookie = auth.getStoredCookie(frontCookie);
-        if (frontCookie === serverCookie) {
-            const data = auth.verified(frontCookie);
-        //     const susdata = data;
-            logger.info(data);
-            if (!data) {
-                res.status(200).json({valid: !data});
-                logger.info("cookie verified");
-            }
-            else {
-                res.status(403).send("Unauthorised ");
-                logger.warn(`cookie ${frontCookie} rejected`);
-            }
+        if (!!frontCookie) {
+            logger.warn(`coookie is invalid`);
+            res.status(403).send("Unauthorised");
         }
         else {
-            res.status(403).send("Unauthorised");
-            logger.warn(`coookie ${frontCookie} is invalid`);
+            const serverCookie = auth.verified(frontCookie);
+            if (frontCookie === serverCookie) {
+                const data = auth.verified(frontCookie);
+                // logger.info(data);
+                if (!data) {
+                    res.status(200).json({valid: !data});
+                    logger.info("cookie verified");
+                } else {
+                    res.status(403).send("Unauthorised ");
+                    logger.warn(`cookie ${frontCookie} rejected`);
+                }
+            } else {
+                res.status(403).send("Unauthorised");
+                logger.warn(`coookie ${frontCookie} is invalid`);
+            }
         }
     } catch (err) {
         logger.error('cookie erorrrrrr', err);
@@ -98,6 +99,21 @@ router.post('/users/login', async (req, res) => {
         }
 });
 
+router.post('/users/logout', async (req, res) => {
+    const secret = req.body;
+    try {
+        if (!!secret) {
+            auth.logOut(secret);
+            return res.status(200).send('logged out' );
+        }
+        else {
+            return res.status(400).send('invalid payload');
+        }
+    } catch (err) {
+        logger.error('Error in /users (logout):', err);
+        return res.status(500).json({ error: err.message });
+    }
+});
 
 
 // --- Chat Data ---

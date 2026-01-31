@@ -13,7 +13,7 @@ const router = express.Router();
 // --- Users ---
 router.get('/users', async (req, res) => {
     const user = auth.verified(req.query.secret)
-    if (!!user) {
+    if (!user) {
         res.status(403).send("Unauthorised");
         return
     }
@@ -23,6 +23,35 @@ router.get('/users', async (req, res) => {
     }
     catch (err) {
         res.status(500).json({ error: err.message });
+    }
+});
+
+router.get('/users/active', async (req, res) => {
+    const susvar = req.query.secret
+logger.warn(req.query.secret)
+    const userSecret = auth.GetServerSecret(req.query.secret);
+    logger.info(userSecret, "user secret");
+    if (!userSecret) {
+        res.status(403).send("bad cookie");
+        logger.error("No cookie provided");
+        return {
+            success: false,
+        }
+    }
+    else {
+        try {
+            const data = await auth.getActiveUser(userSecret);
+            logger.info("getactiveuser data " + JSON.stringify(data));
+            if (!data) {
+                res.status(200).send("error");
+            }
+            else {
+                res.status(200).send(data.uuid);
+                logger.info(`User ${JSON.stringify(data.uuid)} is active`);
+            }
+        } catch (err) {
+            res.status(500).json({error: err.message});
+        }
     }
 });
 
@@ -39,28 +68,29 @@ router.get('/users/:user_id', async (req, res) => {
 });
 
 router.get('/checkcookie', async (req, res) => {
-    const frontCookie = req.params.cookie;
-
+    const frontCookie = req.query.cookie;
+    logger.info(JSON.stringify(frontCookie) + " Front has a cooker")
     try {
-        if (!!frontCookie) {
-            logger.warn(`coookie is invalid`);
-            res.status(403).send("Unauthorised");
+        if (!frontCookie) {
+            logger.warn(`no cookie`);
+            res.status(403).send("Not a ckookie" + {valid: false});
         }
         else {
-            const serverCookie = auth.verified(frontCookie);
-            if (frontCookie === serverCookie) {
-                const data = auth.verified(frontCookie);
-                // logger.info(data);
-                if (!data) {
-                    res.status(200).json({valid: !data});
-                    logger.info("cookie verified");
-                } else {
-                    res.status(403).send("Unauthorised ");
-                    logger.warn(`cookie ${frontCookie} rejected`);
+            const hasServerCookie = auth.hasServerSecret(frontCookie);
+            logger.info(hasServerCookie + " Server has cook");
+            if (hasServerCookie) {
+                const serverCookie = auth.GetServerSecret(frontCookie)
+                if ((serverCookie === frontCookie)) {
+                    res.status(200).json({valid: true});
+                    logger.info("cookie verified " + frontCookie);
+                }
+                else {
+                res.status(200).send({valid: false});
+                logger.warn(`cookie ${frontCookie} rejected`);
                 }
             } else {
-                res.status(403).send("Unauthorised");
-                logger.warn(`coookie ${frontCookie} is invalid`);
+                res.status(200).send({valid: false});
+                logger.warn(`cookie ${frontCookie} is invalid`);
             }
         }
     } catch (err) {
@@ -92,7 +122,7 @@ router.post('/users/login', async (req, res) => {
                 return res.status(400).send('Username and password are required' );
             }
             const result = await auth.authenticate(username, password);
-            return res.json(result);
+            return res.send(result);
         } catch (err) {
             logger.error('Error in /users (login):', err);
             return res.status(500).json({ error: err.message });

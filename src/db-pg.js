@@ -195,10 +195,11 @@ async function getUserAuth(username) {
 
 async function getUsers() {
     const result = await pool.query(
-        'SELECT username, username_color FROM users'
+        'SELECT user_id, username, username_color FROM users'
     );
     return result.rows;
 }
+
 
 async function getUserByUsername(username) {
     const result = await pool.query(

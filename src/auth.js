@@ -1,6 +1,5 @@
 import database from "./db-loader.js";
-import { config } from 'dotenv';
-import { logger } from './log.js';
+import {logger} from './log.js';
 import bcrypt from 'bcrypt';
 import crypto from 'crypto';
 
@@ -8,18 +7,22 @@ const BCRYPT_SALT_ROUNDS = 10;
 
 let secrets = new Map();
 
+//generates a uuid
 function genUUID() {
     return crypto.randomUUID();
 }
 
+//generates secret for the map
 function genSecret() {
     return Buffer.from(crypto.randomBytes(32)).toString('base64');
 }
 
+//confirms password style
 function checkPasswordStyle(password) {
     return /^(?=.*\d)(?=.*[a-z])(?=.*[A-Z]).{8,32}$/.test(password);
 }
 
+//registration logic
 //TODO improve user responsiveness
 async function register(username, password) {
     const hashedPassword = await bcrypt.hash(password, BCRYPT_SALT_ROUNDS);
@@ -44,21 +47,22 @@ async function register(username, password) {
             logger.info(`new user registered with username: ${username}`);
         }
         else {
-            logger.warn('User already registered');
+            logger.error('User already registered');
             return null;
         }
     } catch (error) {
-        console.error(error);
+        logger.error(error);
         return null;
     }
     return uuid;
 }
 
+//basically login logic
 async function authenticate(username, password) {
     try {
         const gotUsername = await database.getUserAuth(username)
         if (!gotUsername) {
-            logger.info("Wrong username input")
+            logger.info("Wrong username input");
             return {
                 success: false,
                 failure: "Username doesn't exist",
@@ -66,7 +70,7 @@ async function authenticate(username, password) {
         }
         const isCorrect = bcrypt.compareSync(password, gotUsername.password_hash);
         if (!isCorrect) {
-            logger.info("Wrong password input")
+            logger.info("Wrong password input");
 
             return {
                 success: false,
@@ -75,7 +79,7 @@ async function authenticate(username, password) {
         }
         const secret = genSecret();
         secrets.set(secret, {uuid: gotUsername.user_id, username: username});
-        logger.info("secret set")
+        logger.info("secret set");
 
         return {
             success: true,
@@ -86,24 +90,53 @@ async function authenticate(username, password) {
         console.error(error);
         return {
             success: false,
-            failure: "error occured",
+            failure: "error occurred",
         }
     }
 }
 
+//returns data from map using key as param
 function verified(secret) {
-    // logger.info(secrets, "verified");
-    return secrets.get(secret)
+    logger.info(secrets);
+    const data = secrets.get(secret);
+    logger.info(data);
+    if (data) {
+        return data
+    }
 }
 
-// function getStoredCookie(secret) {
-//     logger.info(secrets, "getStoredCookie");
-//     return secrets.get(secret)
-// }
-
+//deletes param secret from map
 function logOut(secret) {
-    secrets.delete(secret)
-    logger.warn(`Secret ${secret} deleted, user logged out`)
+    secrets.delete(secret);
+    logger.warn(`Secret ${JSON.stringify(secret)} deleted, user logged out`);
+}
+
+//returns param secret if secret is in map
+function GetServerSecret(key) {
+    if (secrets.has(key)) {
+        return key;
+    } else {
+        return false;
+    }
+}
+
+//returns bool based on presence of the param key in map
+function hasServerSecret(key) {
+    return secrets.has(key);
+}
+
+//returns user data based on the secret in the map
+async function getActiveUser(secret) {
+    const gotUsername = await verified(secret);
+    logger.info(JSON.stringify(gotUsername), " getActiveUser");
+    if (!gotUsername) {
+        return null
+    }
+    else {
+        logger.info(`user ${secrets} accessed` );
+        logger.info("auth 115 + secrets " + gotUsername);
+        return gotUsername;
+    }
 }
 
 export default {
@@ -111,4 +144,7 @@ export default {
     authenticate,
     verified,
     logOut,
+    getActiveUser,
+    hasServerSecret,
+    GetServerSecret,
 }

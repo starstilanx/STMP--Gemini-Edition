@@ -465,7 +465,7 @@ async function resolveUsernameHint(parsedMessage, user) {
     return ai;
 }
 console.log('Setup complete5');
-import dbRouter from './src/db_routes.js'; // Import the new router
+import dbRouter from './src/general_routes.js'; // Import the new router
 
 //MARK: Routes
 

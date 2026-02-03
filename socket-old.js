@@ -18,7 +18,7 @@ import { fileURLToPath } from 'url';
 import { watch, readFile } from 'fs';
 import { readFile as readFileAsync } from 'fs/promises';
 import bodyParser from 'body-parser';
-import dbRouter from './src/db_routes.js';
+import dbRouter from './src/general_routes.js';
 
 import converter from './src/purify.js';
 const __filename = fileURLToPath(import.meta.url);
@@ -2928,7 +2928,7 @@ process.on('SIGINT', async () => {
 
 
 
-/* REMOVED: Replaced by dedicated db_routes.js
+/* REMOVED: Replaced by dedicated general_routes.js
 localApp.get('/api/db/:table', ...);
 localApp.get('/api/db/aichats', ...);
 localApp.get('/api/db/users/:user_id', ...);

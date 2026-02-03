@@ -1,22 +1,23 @@
 import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
-import router from './src/db_routes.js';
+import cookieParser from 'cookie-parser';
+import router from './src/general_routes.js';
 import path from 'path';
 import { logger } from './src/log.js';
 import { fileURLToPath } from 'url';
+import secureRouter from "./src/secure_routes.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const localApp = express();
 
-
-localApp.use(cors()); // Enable CORS for local app
+localApp.use(cors());
 localApp.use(bodyParser.json());
-
-
+localApp.use(cookieParser());
 
 localApp.use('/api', router);
+localApp.use('/api/secure', secureRouter);
 
 localApp.get('/', async (req, res) => {
     const filePath = path.join(__dirname, 'public/client.html');

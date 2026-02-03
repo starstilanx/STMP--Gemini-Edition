@@ -112,7 +112,7 @@ function logOut(secret) {
 }
 
 //returns param secret if secret is in map
-function GetServerSecret(key) {
+function getServerSecret(key) {
     if (secrets.has(key)) {
         return key;
     } else {
@@ -139,12 +139,28 @@ async function getActiveUser(secret) {
     }
 }
 
+const checkSecret = (req, res, next) => {
+    const clientSecret = req.cookies['secret'];
+
+    if (!clientSecret) {
+        logger.warn(JSON.stringify(req.cookies) + "failed login attempt");
+        return res.status(403).send({ error: "No secret provided" });
+    }
+    const isValid = secrets.has(clientSecret);
+    if (isValid && (clientSecret === getServerSecret(clientSecret))) {
+        next();
+    } else {
+        res.status(403).send({ error: "Invalid or expired secret" });
+    }
+};
+
 export default {
     register,
     authenticate,
     verified,
     logOut,
+    checkSecret,
     getActiveUser,
     hasServerSecret,
-    GetServerSecret,
+    GetServerSecret: getServerSecret,
 }

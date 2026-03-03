@@ -36,7 +36,7 @@ secureRouter.post('/users/logout', async (req, res) => {
 
 secureRouter.get('/users/active', async (req, res) => {
     logger.warn(req.cookies['secret'])
-    const userSecret = auth.GetServerSecret(req.cookies['secret']);
+    const userSecret = auth.getServerSecret(req.cookies['secret']);
     logger.info(userSecret, "user secret");
     // if (!userSecret) {
     //     res.status(403).send("bad cookie");

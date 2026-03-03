@@ -24,7 +24,7 @@ router.get('/checkcookie', async (req, res) => {
             const hasServerCookie = auth.hasServerSecret(frontCookie);
             logger.info(hasServerCookie + " Server has cook");
             if (hasServerCookie) {
-                const serverCookie = auth.GetServerSecret(frontCookie)
+                const serverCookie = auth.getServerSecret(frontCookie)
                 if ((serverCookie === frontCookie)) {
                     res.status(200).json({valid: true});
                     logger.info("cookie verified " + frontCookie);

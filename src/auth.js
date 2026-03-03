@@ -157,10 +157,10 @@ const checkSecret = (req, res, next) => {
 export default {
     register,
     authenticate,
-    verified,
     logOut,
     checkSecret,
     getActiveUser,
     hasServerSecret,
-    GetServerSecret: getServerSecret,
+    getServerSecret,
+    verified,
 }

@@ -3,6 +3,8 @@ import database from "./db-loader.js";
 import {dbLogger as logger} from "./log.js";
 import express from "express";
 import router from "./general_routes.js";
+import {broadcast} from "../new_ws.js";
+import { writeUserChatMessage } from "./db-pg.js";
 
 const secureRouter = express.Router();
 
@@ -121,23 +123,9 @@ secureRouter.post('/userchats', async (req, res) => {
     logger.info('Received POST request to /userchats');
     logger.info('Request body:', req.body);
     res.status(200).send('request received');
-
-    // try {
-    //     const result = await db.query('INSERT INTO userchats (message_id, session_id, room_id, user_id, username, message, entity, timestamp) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *', [
-    //         req.body.message_id,
-    //         req.body.session_id,
-    //         req.body.room_id,
-    //         req.body.user_id,
-    //         req.body.username,
-    //         req.body.message,
-    //         req.body.entity,
-    //         req.body.timestamp
-    //     ]);
-    //     res.json(result.rows[0]);
-    // } catch (err) {
-    //     logger.error('Error in /userchats:', err);
-    //     res.status(500).json({ error: err.message });
-    // }
+//TODO store msg in database
+    const writtenMsg = await writeUserChatMessage(req.body.user_id, req.body.message, req.body.room_id);
+    broadcast({type: "usermsg", content: { message_id: writtenMsg.message_id, room_id: req.body.room_id, user_id: req.body.user_id, message: req.body.message, timestamp: writtenMsg.timestamp }});
 });
 
 

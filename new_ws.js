@@ -1,29 +1,27 @@
 import auth from "./src/auth.js"
-import {logger} from "./src/log.js"
+import { logger } from "./src/log.js"
+import { writeUserChatMessage } from "./src/db-pg.js";
 
 const sessions = new Map();
 const clientConnections = new Map();
 
 function cookieParser(cookieString) {
-    if (cookieString === "")
-        return {};
+    if (!cookieString) return {};
 
     let pairs = cookieString.split(";");
 
     let splittedPairs = pairs.map(cookie => cookie.split("="));
 
-    const cookieObj = splittedPairs.reduce(function (obj, cookie) {
+    return splittedPairs.reduce(function (obj, cookie) {
         obj[decodeURIComponent(cookie[0].trim())]
             = decodeURIComponent(cookie[1].trim());
 
         return obj;
-    }, {})
-
-    return cookieObj;
+    }, {});
 }
 
 export function handleSocket(ws, req) {
-    logger.warn("client opened connection")
+    logger.info("client opened connection")
     // const urlParams = new URLSearchParams(ws.url.split('?')[1]);
 
     // const clientSecret = urlParams.get('client-secret');
@@ -31,7 +29,7 @@ export function handleSocket(ws, req) {
     const cookies = cookieParser(headers);
     const clientSecret = cookies['secret'];
 
-    logger.info(JSON.stringify(headers));
+    // logger.info(JSON.stringify(headers));
     // const clientSecret = cookieParser(headers);
     logger.warn(clientSecret)
     if (!clientSecret) {
@@ -66,11 +64,46 @@ export function handleSocket(ws, req) {
     sessions.set(sessionID, ws)
     clientConnections.set(verifiedData.uuid, count++);
 
-    ws.on('message', message => {
-        ws.send(message)
+    // ws.on('message', message => {
+    //     ws.send(message)
+    // })
+
+    ws.on('message', async raw => {
+        let msg;
+        try {
+            msg = JSON.parse(raw)
+        } catch {
+            ws.send(JSON.stringify({ type: 'error', error: 'invalid JSON' }))
+            return
+        }
+
+        switch (msg.type) {
+            case 'join':
+                // msg.roomID
+                break
+            case 'message':
+                // msg.content
+                await writeUserChatMessage(req.body.user_id, req.body.message, req.body.room_id);
+                broadcast({ type: "message", content: req.body });
+                break
+            case 'leave':
+                break
+            default:
+                ws.send(JSON.stringify({ type: 'error', error: `unknown type: ${msg.type}` }))
+        }
     })
 
-    ws.on('ping', ws.pong)
+    ws.on('ping', ws.pong) //TODO properly close sockets
 
-    ws.send(':D') //successful socket auth
+    ws.send(JSON.stringify({ type: 'auth', content: 'welcome :D' })) //successful socket auth
+}
+
+export function broadcast(message) {
+    logger.info('broadcast start')
+    logger.info(sessions)
+    logger.info(sessions.size)
+    for (let [sessionID, ws] of sessions) {
+        logger.info('broadcast')
+        ws.send(JSON.stringify(message))
+    }
 }

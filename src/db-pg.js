@@ -11,6 +11,8 @@ import { dbLogger as logger } from './log.js';
 import bcrypt from 'bcrypt';
 import { v4 as uuidv4 } from 'uuid';
 
+// import query from './db.js'
+
 const BCRYPT_SALT_ROUNDS = 10;
 
 // PostgreSQL connection pool
@@ -554,41 +556,19 @@ async function writeAIChatMessage(username, userId, message, entity, roomId = nu
     }, []);
 }
 
-async function writeUserChatMessage(userId, message, roomId = null) {
-    return queueDatabaseWrite(async (client) => {
-        let activeSession;
-        if (roomId) {
-            const sessionResult = await client.query(
-                'SELECT session_id FROM "userSessions" WHERE room_id = $1 AND is_active = TRUE LIMIT 1',
-                [roomId]
-            );
-            activeSession = sessionResult.rows[0]?.session_id;
-        } else {
-            const sessionResult = await client.query(
-                'SELECT session_id FROM "userSessions" WHERE is_active = TRUE LIMIT 1'
-            );
-            activeSession = sessionResult.rows[0]?.session_id;
-        }
-
-        if (!activeSession) {
-            logger.info('[writeUserChatMessage] No active user session found for room', roomId, ', creating a new session...');
-            // Create session directly within this transaction
-            const result = await client.query(
-                'INSERT INTO "userSessions" (room_id, started_at, is_active) VALUES ($1, NOW(), TRUE) RETURNING session_id',
-                [roomId]
-            );
-            activeSession = result.rows[0].session_id;
-            logger.info('[writeUserChatMessage] New user session created with session_id', activeSession, 'for room', roomId);
-        }
-
+export async function writeUserChatMessage(userId, message, roomId = null) {
+    // return queueDatabaseWrite(async (client) => {
         const collapsed = collapseNewlines(message);
 
-        await client.query(
-            `INSERT INTO userchats (session_id, room_id, user_id, message, timestamp, active)
-             VALUES ($1, $2, $3, $4, NOW(), TRUE)`,
-            [activeSession, roomId, userId, collapsed]
+        const result = await pool.query(
+            `INSERT INTO userchats (room_id, user_id, message, timestamp)
+             VALUES ($1, $2, $3, NOW())
+             RETURNING message_id, "timestamp"`,
+            [roomId, userId, collapsed]
         );
-    }, []);
+        return result.rows[0]
+    //TODO maybe normal error handling
+    // }, []);
 }
 
 async function readAIChat() {

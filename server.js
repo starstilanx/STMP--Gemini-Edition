@@ -43,10 +43,10 @@ localApp.use(express.static('public'));
 server.listen(8181, (error) => {
 
     if (error) {
-        console.error('Error starting server:', error);
+        logger.error('Error starting server:', error);
     }
     else {
-        console.log('server running on port 8181');
+        logger.info('server running on port 8181');
     }
 });
 

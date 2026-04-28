@@ -60,25 +60,25 @@ async function register(username, password) {
 //basically login logic
 async function authenticate(username, password) {
     try {
-        const gotUsername = await database.getUserAuth(username)
-        if (!gotUsername) {
+        const authData = await database.getUserAuth(username)
+        if (!authData) {
             logger.info("Wrong username input");
             return {
                 success: false,
-                failure: "Username doesn't exist",
+                failure: "Login failed.",
             };
         }
-        const isCorrect = bcrypt.compareSync(password, gotUsername.password_hash);
+        const isCorrect = bcrypt.compareSync(password, authData.password_hash);
         if (!isCorrect) {
             logger.info("Wrong password input");
-
+//TODO combine checks to make login less bruteforceable
             return {
                 success: false,
-                failure: "lol get rekd",
+                failure: "Login failed.",
             };
         }
         const secret = genSecret();
-        secrets.set(secret, {uuid: gotUsername.user_id, username: username});
+        secrets.set(secret, {uuid: authData.user_id, username: username, role: authData.role});
         logger.info("secret set");
 
         return {
@@ -123,6 +123,15 @@ function getServerSecret(key) {
 //returns bool based on presence of the param key in map
 function hasServerSecret(key) {
     return secrets.has(key);
+}
+
+
+//admin role check
+async function checkAdmin(secret) {
+    const data = secrets.get(secret);
+    if (data.role === 'ADMIN') {
+        return true;
+    }
 }
 
 //returns user data based on the secret in the map

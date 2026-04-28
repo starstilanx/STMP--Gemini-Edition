@@ -189,7 +189,7 @@ async function getUser(uuid) {
 
 async function getUserAuth(username) {
     const result = await pool.query(
-        'SELECT user_id, created_at, last_seen_at, password_hash FROM users WHERE username = $1',
+        'SELECT user_id, created_at, last_seen_at, password_hash, role FROM users WHERE username = $1',
         [username]
     );
     return result.rows[0];
@@ -588,7 +588,7 @@ async function readAIChat() {
     return result.rows;
 }
 
-async function readUserChat() {
+async function readUserChat(roomId) {
     const result = await pool.query(
         `SELECT
             message_id,
@@ -597,8 +597,9 @@ async function readUserChat() {
             message,
             timestamp,
             active
-         FROM userchats
-         ORDER BY timestamp ASC`
+         FROM userchats WHERE room_id = $1
+         ORDER BY timestamp ASC`,
+        [roomId]
     );
     return result.rows;
 }

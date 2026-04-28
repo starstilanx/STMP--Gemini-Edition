@@ -55,7 +55,7 @@ secureRouter.get('/users/active', async (req, res) => {
                 res.status(500).send("error");
             }
             else {
-                res.status(200).send(data.uuid);
+                res.status(200).send({uuid: data.uuid, role: data.role});
                 logger.info(`User ${JSON.stringify(data.uuid)} is active`);
             }
         } catch (err) {
@@ -112,20 +112,23 @@ secureRouter.post('/aichats', async (req, res) => {
 });
 
 
-secureRouter.get('/userchats', async (req, res) => {
+secureRouter.get('/userchats/:roomId', async (req, res) => {
     try {
-        const result = await database.readUserChat();
+        const roomId = req.params.roomId;
+
+        const result = await database.readUserChat(roomId);
         res.json(result);
     } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-secureRouter.post('/userchats', async (req, res) => {
+secureRouter.post('/userchats/:roomId', async (req, res) => {
     logger.info('Received POST request to /userchats');
     logger.info('Request body:', req.body);
     res.status(200).send('request received');
+    const roomId = req.params.roomId;
 //TODO store msg in database
-    const writtenMsg = await writeUserChatMessage(req.body.user_id, req.body.message, req.body.room_id);
-    broadcast({type: "usermsg", content: { message_id: writtenMsg.message_id, room_id: req.body.room_id, user_id: req.body.user_id, message: req.body.message, timestamp: writtenMsg.timestamp }});
+    const writtenMsg = await writeUserChatMessage(req.body.user_id, req.body.message, roomId);
+    broadcast({type: "usermsg", content: { message_id: writtenMsg.message_id, room_id: roomId, user_id: req.body.user_id, message: req.body.message, timestamp: writtenMsg.timestamp }});
 });
 
 
